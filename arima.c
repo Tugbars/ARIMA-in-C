@@ -447,14 +447,142 @@ void invert3x3Matrix(int n, double matrix[][n], double inverseMatrix[][n]) {
  * @param matrix Input 4x4 matrix.
  * @param inverse Output inverted 4x4 matrix.
  *
- * @note The implementation follows the standard method for computing a 4x4 matrix inverse.
+ * @note This function computes the adjugate matrix and divides by the determinant.
+ *       If the determinant is near zero, an error is printed and the program exits.
  */
 void invert4x4Matrix(double matrix[4][4], double inverse[4][4]) {
     double det;
-    // (The code here is as in your original implementation with appropriate comments.)
-    // For brevity, the full implementation is not repeated.
-    // ...
+    
+    // Compute the cofactors (elements of the adjugate matrix, before transposition)
+    inverse[0][0] = matrix[1][1] * matrix[2][2] * matrix[3][3] -
+                    matrix[1][1] * matrix[2][3] * matrix[3][2] -
+                    matrix[2][1] * matrix[1][2] * matrix[3][3] +
+                    matrix[2][1] * matrix[1][3] * matrix[3][2] +
+                    matrix[3][1] * matrix[1][2] * matrix[2][3] -
+                    matrix[3][1] * matrix[1][3] * matrix[2][2];
+
+    inverse[1][0] = -matrix[1][0] * matrix[2][2] * matrix[3][3] +
+                     matrix[1][0] * matrix[2][3] * matrix[3][2] +
+                     matrix[2][0] * matrix[1][2] * matrix[3][3] -
+                     matrix[2][0] * matrix[1][3] * matrix[3][2] -
+                     matrix[3][0] * matrix[1][2] * matrix[2][3] +
+                     matrix[3][0] * matrix[1][3] * matrix[2][2];
+
+    inverse[2][0] = matrix[1][0] * matrix[2][1] * matrix[3][3] -
+                    matrix[1][0] * matrix[2][3] * matrix[3][1] -
+                    matrix[2][0] * matrix[1][1] * matrix[3][3] +
+                    matrix[2][0] * matrix[1][3] * matrix[3][1] +
+                    matrix[3][0] * matrix[1][1] * matrix[2][3] -
+                    matrix[3][0] * matrix[1][3] * matrix[2][1];
+
+    inverse[3][0] = -matrix[1][0] * matrix[2][1] * matrix[3][2] +
+                     matrix[1][0] * matrix[2][2] * matrix[3][1] +
+                     matrix[2][0] * matrix[1][1] * matrix[3][2] -
+                     matrix[2][0] * matrix[1][2] * matrix[3][1] -
+                     matrix[3][0] * matrix[1][1] * matrix[2][2] +
+                     matrix[3][0] * matrix[1][2] * matrix[2][1];
+
+    inverse[0][1] = -matrix[0][1] * matrix[2][2] * matrix[3][3] +
+                     matrix[0][1] * matrix[2][3] * matrix[3][2] +
+                     matrix[2][1] * matrix[0][2] * matrix[3][3] -
+                     matrix[2][1] * matrix[0][3] * matrix[3][2] -
+                     matrix[3][1] * matrix[0][2] * matrix[2][3] +
+                     matrix[3][1] * matrix[0][3] * matrix[2][2];
+
+    inverse[1][1] = matrix[0][0] * matrix[2][2] * matrix[3][3] -
+                    matrix[0][0] * matrix[2][3] * matrix[3][2] -
+                    matrix[2][0] * matrix[0][2] * matrix[3][3] +
+                    matrix[2][0] * matrix[0][3] * matrix[3][2] +
+                    matrix[3][0] * matrix[0][2] * matrix[2][3] -
+                    matrix[3][0] * matrix[0][3] * matrix[2][2];
+
+    inverse[2][1] = -matrix[0][0] * matrix[2][1] * matrix[3][3] +
+                     matrix[0][0] * matrix[2][3] * matrix[3][1] +
+                     matrix[2][0] * matrix[0][1] * matrix[3][3] -
+                     matrix[2][0] * matrix[0][3] * matrix[3][1] -
+                     matrix[3][0] * matrix[0][1] * matrix[2][3] +
+                     matrix[3][0] * matrix[0][3] * matrix[2][1];
+
+    inverse[3][1] = matrix[0][0] * matrix[2][1] * matrix[3][2] -
+                    matrix[0][0] * matrix[2][2] * matrix[3][1] -
+                    matrix[2][0] * matrix[0][1] * matrix[3][2] +
+                    matrix[2][0] * matrix[0][2] * matrix[3][1] +
+                    matrix[3][0] * matrix[0][1] * matrix[2][2] -
+                    matrix[3][0] * matrix[0][2] * matrix[2][1];
+
+    inverse[0][2] = matrix[0][1] * matrix[1][2] * matrix[3][3] -
+                    matrix[0][1] * matrix[1][3] * matrix[3][2] -
+                    matrix[1][1] * matrix[0][2] * matrix[3][3] +
+                    matrix[1][1] * matrix[0][3] * matrix[3][2] +
+                    matrix[3][1] * matrix[0][2] * matrix[1][3] -
+                    matrix[3][1] * matrix[0][3] * matrix[1][2];
+
+    inverse[1][2] = -matrix[0][0] * matrix[1][2] * matrix[3][3] +
+                     matrix[0][0] * matrix[1][3] * matrix[3][2] +
+                     matrix[1][0] * matrix[0][2] * matrix[3][3] -
+                     matrix[1][0] * matrix[0][3] * matrix[3][2] -
+                     matrix[3][0] * matrix[0][2] * matrix[1][3] +
+                     matrix[3][0] * matrix[0][3] * matrix[1][2];
+
+    inverse[2][2] = matrix[0][0] * matrix[1][1] * matrix[3][3] -
+                    matrix[0][0] * matrix[1][3] * matrix[3][1] -
+                    matrix[1][0] * matrix[0][1] * matrix[3][3] +
+                    matrix[1][0] * matrix[0][3] * matrix[3][1] +
+                    matrix[3][0] * matrix[0][1] * matrix[1][3] -
+                    matrix[3][0] * matrix[0][3] * matrix[1][1];
+
+    inverse[3][2] = -matrix[0][0] * matrix[1][1] * matrix[3][2] +
+                     matrix[0][0] * matrix[1][2] * matrix[3][1] +
+                     matrix[1][0] * matrix[0][1] * matrix[3][2] -
+                     matrix[1][0] * matrix[0][2] * matrix[3][1] -
+                     matrix[3][0] * matrix[0][1] * matrix[1][2] +
+                     matrix[3][0] * matrix[0][2] * matrix[1][1];
+
+    inverse[0][3] = -matrix[0][1] * matrix[1][2] * matrix[2][3] +
+                     matrix[0][1] * matrix[1][3] * matrix[2][2] +
+                     matrix[1][1] * matrix[0][2] * matrix[2][3] -
+                     matrix[1][1] * matrix[0][3] * matrix[2][2] -
+                     matrix[2][1] * matrix[0][2] * matrix[1][3] +
+                     matrix[2][1] * matrix[0][3] * matrix[1][2];
+
+    inverse[1][3] = matrix[0][0] * matrix[1][2] * matrix[2][3] -
+                    matrix[0][0] * matrix[1][3] * matrix[2][2] -
+                    matrix[1][0] * matrix[0][2] * matrix[2][3] +
+                    matrix[1][0] * matrix[0][3] * matrix[2][2] +
+                    matrix[2][0] * matrix[0][2] * matrix[1][3] -
+                    matrix[2][0] * matrix[0][3] * matrix[1][2];
+
+    inverse[2][3] = -matrix[0][0] * matrix[1][1] * matrix[2][3] +
+                     matrix[0][0] * matrix[1][3] * matrix[2][1] +
+                     matrix[1][0] * matrix[0][1] * matrix[2][3] -
+                     matrix[1][0] * matrix[0][3] * matrix[2][1] -
+                     matrix[2][0] * matrix[0][1] * matrix[1][3] +
+                     matrix[2][0] * matrix[0][3] * matrix[1][1];
+
+    inverse[3][3] = matrix[0][0] * matrix[1][1] * matrix[2][2] -
+                    matrix[0][0] * matrix[1][2] * matrix[2][1] -
+                    matrix[1][0] * matrix[0][1] * matrix[2][2] +
+                    matrix[1][0] * matrix[0][2] * matrix[2][1] +
+                    matrix[2][0] * matrix[0][1] * matrix[1][2] -
+                    matrix[2][0] * matrix[0][2] * matrix[1][1];
+
+    // Compute the determinant using the first row and its cofactors.
+    det = matrix[0][0] * inverse[0][0] + matrix[0][1] * inverse[1][0] +
+          matrix[0][2] * inverse[2][0] + matrix[0][3] * inverse[3][0];
+
+    if (fabs(det) < 1e-8) {
+        fprintf(stderr, "Error: Determinant is near zero in invert4x4Matrix.\n");
+        exit(EXIT_FAILURE);
+    }
+    det = 1.0 / det;
+    // Multiply the adjugate matrix by 1/det to obtain the inverse.
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            inverse[i][j] *= det;
+        }
+    }
 }
+
 
 /**
  * @brief Transposes a matrix.
