@@ -154,6 +154,22 @@
 
 #define MAX_ITERATIONS 300
 
+// Numerical threshold for detecting near-zero pivot elements in LU decomposition.
+#define SINGULARITY_THRESHOLD 1e-12
+
+// Forecasting horizon: number of forecast steps (excluding additional summary metrics).
+#define FORECAST_HORIZON 16
+
+// Total size for forecast arrays: forecast horizon plus extra space for summary metrics (e.g., MAPE, error variance).
+#define FORECAST_ARRAY_SIZE (FORECAST_HORIZON + 2)
+
+// Critical value for the augmented Dickey–Fuller (ADF) test.
+// In this simplified test, if the estimated coefficient on the lagged level is below this value, we reject the unit root.
+#define ADF_CRITICAL_VALUE -3.5
+
+// Exponent used in computing the lag order for the ADF test (e.g., p = floor((n-1)^(1/3)) ).
+#define ADF_LAG_EXPONENT (1.0/3.0)
+
 
 #ifdef DEBUG
 #define DEBUG_PRINT(...) printf(__VA_ARGS__)
@@ -512,7 +528,7 @@ int luDecomposition(int n, double A[n][n], int pivot[n]) {
             }
         }
         DEBUG_PRINT("LU Decomposition: k=%d, maxIndex=%d, max=%lf\n", k, maxIndex, max);
-        if (max < 1e-12) {
+        if (max < SINGULARITY_THRESHOLD) {
             DEBUG_PRINT("LU Decomposition: Matrix is singular at k=%d\n", k);
             return -1; // Singular matrix
         }
@@ -977,7 +993,7 @@ double computeCorrelation(double array1[], double array2[], int length) {
 // and 0 otherwise.
 int ADFTest(double series[], int length) {
     // Determine lag order p, e.g., floor((length-1)^(1/3))
-    int p = (int)floor(pow(length - 1, 1.0/3.0));
+    int p = (int)floor(pow(length - 1, ADF_LAG_EXPONENT));
     if (p < 1) p = 1;  // ensure at least one lag
     int nEff = length - p - 1; // effective number of observations
 
@@ -1019,7 +1035,7 @@ int ADFTest(double series[], int length) {
     double beta = beta_est[1];
 
     // Use a placeholder critical value (for example, -3.5) for the test statistic.
-    int reject = (beta < -3.5) ? 1 : 0; // if beta is below critical value, reject unit root
+    int reject = (beta < ADF_CRITICAL_VALUE) ? 1 : 0; // if beta is below critical value, reject unit root
 
     // Free allocated memory.
     for (int i = 0; i < nEff; i++) {
@@ -1339,11 +1355,11 @@ double calculateMAE(double actual[], double predicted[], int length) {
  *
  * @param series The input time series.
  * @param length The length of the series.
- * @return A dynamically allocated array of forecasted values; element 16 contains the MAPE.
+ * @return A dynamically allocated array of forecasted values; element FORECAST_HORIZON contains the MAPE.
  *
  * The function estimates an AR(1) model using the last (length-1) observations,
  * computes the in-sample prediction error (MAPE), and then recursively forecasts
- * 16 future values.
+ * FORECAST_HORIZON amount of future values.
  */
 double* forecastAR1(double series[], int length) {
     int newLength = length - 1;
@@ -1358,7 +1374,7 @@ double* forecastAR1(double series[], int length) {
     double rss = calculateArraySum(squareArray(residuals, newLength), newLength);
     double sigma2 = rss / (newLength - 2);
     
-    double* forecast = malloc(sizeof(double) * 18);
+    double* forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
     if (!forecast) exit(EXIT_FAILURE);
     
     double lastValue = series[newLength - 1];
@@ -1367,12 +1383,12 @@ double* forecastAR1(double series[], int length) {
     // Compute cumulative forecast error variance using the formula:
     // Var(h) = sigma2 * sum_{i=0}^{h-1} (phi^(2*i))
     double cumulativeVariance = sigma2;  // for horizon h=1
-    for (int i = 1; i < 16; i++) {
+    for (int i = 1; i < FORECAST_HORIZON; i++) {
         forecast[i] = forecast[i - 1] * phi + intercept;
         cumulativeVariance += sigma2 * pow(phi, 2 * i);
     }
-    // Store the cumulative variance (as a proxy for uncertainty) in forecast[16]
-    forecast[16] = cumulativeVariance;
+    // Store the cumulative variance (as a proxy for uncertainty) in forecast[FORECAST_HORIZON]
+    forecast[FORECAST_HORIZON] = cumulativeVariance;
     free(regressionEstimates);
     return forecast;
 }
@@ -1386,7 +1402,7 @@ double* forecastAR1(double series[], int length) {
  *
  * @param series The input time series.
  * @param length The length of the series.
- * @return A dynamically allocated forecast array (16 forecasts and MAPE).
+ * @return A dynamically allocated forecast array (FORECAST_HORIZON amount of forecasts and MAPE).
  *
  * This example model combines autoregressive and moving average components.
  * It involves an iterative procedure to update the MA parameters until convergence.
@@ -1425,19 +1441,19 @@ double* forecastAR1MA1(double series[], int length) {
     double estimatedTheta, estimatedC;
     estimateMA1Parameters(errorLag, arComponent, maLength, &estimatedTheta, &estimatedC);
     
-    // Generate a simple recursive forecast (here we produce 16 forecast values)
-    double *forecast = malloc(sizeof(double) * 18);
+    // Generate a simple recursive forecast (here we produce FORECAST_HORIZON amount of forecast values)
+    double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
     if (!forecast) exit(EXIT_FAILURE);
     // For example, use the last error value to produce a one‐step forecast:
     double lastError = errorLag[maLength - 1];
     forecast[0] = estimatedTheta * lastError + estimatedC;
     // Here we simply replicate the forecast recursively (adjust as needed)
-    for (int i = 1; i < 16; i++) {
+    for (int i = 1; i < FORECAST_HORIZON; i++) {
         forecast[i] = forecast[i - 1];
     }
-    // Compute and store a placeholder MAPE in forecast[16]
+    // Compute and store a placeholder MAPE in forecast[FORECAST_HORIZON]
     double mapeValue = calculateMAPE(arComponent, diffSeriesPred, maLength);
-    forecast[16] = mapeValue;
+    forecast[FORECAST_HORIZON] = mapeValue;
     return forecast;
 }
 
@@ -1446,7 +1462,7 @@ double* forecastAR1MA1(double series[], int length) {
  *
  * @param series The input time series.
  * @param seriesLength The number of observations in the series.
- * @return A pointer to a dynamically allocated forecast array (first 16 forecasts; element 16 holds MAPE).
+ * @return A pointer to a dynamically allocated forecast array (first FORECAST_HORIZON forecasts; element FORECAST_HORIZON holds MAPE).
  *
  * This function performs the following steps:
  *   1. Constructs a differenced series for the AR component.
@@ -1504,16 +1520,16 @@ double* forecastAR1MA2(double series[], int seriesLength) {
     
     // Step 6: Generate recursive forecasts.
     double forecastMAPE = calculateMAPE(targetSeries, targetSeries, maDataLength); // placeholder
-    double *forecast = malloc(sizeof(double) * 18);
+    double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
     if (!forecast) exit(EXIT_FAILURE);
     double lastValue = targetSeries[maDataLength - 1];
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < FORECAST_HORIZON; i++) {
         forecast[i] = estimatedTheta1 * lastValue +
                       estimatedTheta2 * errorLag2[maDataLength - 1] +
                       estimatedMAIntercept;
         lastValue = forecast[i];
     }
-    forecast[16] = forecastMAPE;
+    forecast[FORECAST_HORIZON] = forecastMAPE;
     return forecast;
 }
 
@@ -1556,16 +1572,16 @@ double* forecastAR2MA1(double series[], int seriesLength) {
     double estimatedTheta, estimatedMAIntercept;
     estimateMA1Parameters(maLag, maTarget, maDataLength, &estimatedTheta, &estimatedMAIntercept);
     
-    double *forecast = malloc(sizeof(double) * 18);
+    double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
     if (!forecast) exit(EXIT_FAILURE);
     double lastARValue = arResponse[arDataLength - 2];
     double lastError = arError[arDataLength - 2];
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < FORECAST_HORIZON; i++) {
         forecast[i] = lastARValue * phi1 + lastARValue * phi2 +
                       estimatedMAIntercept + estimatedTheta * lastError;
         lastARValue = forecast[i];
     }
-    forecast[16] = calculateMAPE(arResponse, arPred, arDataLength - 1);
+    forecast[FORECAST_HORIZON] = calculateMAPE(arResponse, arPred, arDataLength - 1);
     return forecast;
 }
 
@@ -1610,16 +1626,16 @@ double* forecastAR2MA2(double series[], int seriesLength) {
     estimateMA2Parameters(maTarget, maLag1, maLag2, maDataLength,
                           &estimatedTheta1, &estimatedTheta2, &estimatedMAIntercept);
     
-    double *forecast = malloc(sizeof(double) * 18);
+    double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
     if (!forecast) exit(EXIT_FAILURE);
     double lastValue = maTarget[maDataLength - 1];
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < FORECAST_HORIZON; i++) {
         forecast[i] = lastValue * phi1 + lastValue * phi2 +
                       estimatedMAIntercept + estimatedTheta1 * maLag1[maDataLength - 1] +
                       estimatedTheta2 * maLag2[maDataLength - 1];
         lastValue = forecast[i];
     }
-    forecast[16] = calculateMAPE(maTarget, maTarget, maDataLength); // placeholder
+    forecast[FORECAST_HORIZON] = calculateMAPE(maTarget, maTarget, maDataLength); // placeholder
     return forecast;
 }
 
