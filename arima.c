@@ -889,30 +889,47 @@ double computeCorrelation(double array1[], double array2[], int length) {
  */
 int DFTest(double series[], double recoveryInfo[], int length) {
     int diffOrder = 0;
-    int adjustment = 0;
-    double* regressionEstimates;
+    double beta, se, tStat;
     double leadSeries[length - 1], lagSeries[length - 1];
-    
-    do {
-        // Create a lead series (shifted by 1) and a lag series.
+    // Continue differencing until the t-statistic indicates rejection of the unit root
+    while (length > 3) {
+        // Create lead and lag series (lag=1)
         calculateLead(series, leadSeries, length, 1);
         calculateLag(series, lagSeries, length, 1);
-        regressionEstimates = performUnivariateLinearRegression(lagSeries, leadSeries, length - 1);
+        double* estimates = performUnivariateLinearRegression(lagSeries, leadSeries, length - 1);
+        beta = estimates[0];
+        double intercept = estimates[1];
+        free(estimates);
         
-        if (diffOrder > 0) {
-            // If already differenced, update the series using the difference.
-            for (int i = 0; i < (length - adjustment); i++) {
-                series[i] = (adjustment * series[i + adjustment]) - series[i];
-            }
-            length -= 1;
+        // Compute predictions and residuals
+        double predictions[length - 1];
+        predictUnivariate(lagSeries, predictions, beta, intercept, length - 1);
+        double residuals[length - 1];
+        calculateArrayDifference(leadSeries, predictions, residuals, length - 1);
+        
+        // Estimate variance and standard error of the slope
+        double rss = calculateArraySum(squareArray(residuals, length - 1), length - 1);
+        double s2 = rss / (length - 1 - 2); // degrees of freedom = n-2
+        double meanLag = calculateMean(lagSeries, length - 1);
+        double Sxx = 0.0;
+        for (int i = 0; i < length - 1; i++) {
+            Sxx += (lagSeries[i] - meanLag) * (lagSeries[i] - meanLag);
         }
-        recoveryInfo[diffOrder] = series[length - 1];
+        se = sqrt(s2 / Sxx);
+        tStat = (beta - 1.0) / se;
+        // If tStat is significantly negative (here using -3.0 as a rough cutoff), then reject unit-root.
+        if (tStat < -3.0)
+            break;
+        
+        // Otherwise, difference the series (standard first difference)
+        for (int i = 0; i < length - 1; i++) {
+            series[i] = series[i + 1] - series[i];
+        }
+        recoveryInfo[diffOrder] = series[length - 1]; // save drift info
         diffOrder++;
-        adjustment = 1;
-    } while (!(regressionEstimates[0] <= UNIT_TOLERANCE && regressionEstimates[0] >= -UNIT_TOLERANCE));
-    
-    free(regressionEstimates);
-    return (diffOrder - 1);
+        length -= 1;
+    }
+    return diffOrder;
 }
 
 /**
@@ -1057,19 +1074,32 @@ double calculateMAE(double actual[], double predicted[], int length) {
 double* forecastAR1(double series[], int length) {
     int newLength = length - 1;
     double* regressionEstimates = performUnivariateLinearRegression(series, series + 1, newLength);
+    double phi = regressionEstimates[0];
+    double intercept = regressionEstimates[1];
+    // Compute residuals and estimate sigma^2
+    double predictions[newLength];
+    predictUnivariate(series, predictions, phi, intercept, newLength);
+    double residuals[newLength];
+    calculateArrayDifference(series + 1, predictions, residuals, newLength);
+    double rss = calculateArraySum(squareArray(residuals, newLength), newLength);
+    double sigma2 = rss / (newLength - 2);
+    
     double* forecast = malloc(sizeof(double) * 18);
     if (!forecast) exit(EXIT_FAILURE);
     
     double lastValue = series[newLength - 1];
-    double mapeValue = calculateMAPE(series + 1, series, newLength);  // placeholder computation
+    forecast[0] = lastValue * phi + intercept;
     
-    // Recursive forecasting for 16 steps.
-    for (int i = 0; i < 16; i++) {
-        forecast[i] = lastValue * regressionEstimates[0] + regressionEstimates[1];
-        lastValue = forecast[i];
+    // Compute cumulative forecast error variance using the formula:
+    // Var(h) = sigma2 * sum_{i=0}^{h-1} (phi^(2*i))
+    double cumulativeVariance = sigma2;  // for horizon h=1
+    for (int i = 1; i < 16; i++) {
+        forecast[i] = forecast[i - 1] * phi + intercept;
+        cumulativeVariance += sigma2 * pow(phi, 2 * i);
     }
+    // Store the cumulative variance (as a proxy for uncertainty) in forecast[16]
+    forecast[16] = cumulativeVariance;
     free(regressionEstimates);
-    forecast[16] = mapeValue;
     return forecast;
 }
 
