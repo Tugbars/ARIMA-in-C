@@ -479,180 +479,202 @@ void matrixMultiply(int rowsA, int colsA, int colsB, double A[][colsA], double B
     }
 }
 
+
 /**
- * @brief Inverts a 3x3 matrix.
+ * @brief Performs LU decomposition with partial pivoting.
  *
- * @param n The dimension (should be 3).
- * @param matrix Input 3x3 matrix.
- * @param inverseMatrix Output inverted matrix.
+ * This function decomposes a square matrix A (n x n) into a product of a lower 
+ * triangular matrix L and an upper triangular matrix U (stored in the same matrix),
+ * while computing a pivot array that records the row exchanges.
+ *
+ * Partial pivoting is employed to enhance numerical stability, especially for
+ * nearly singular matrices. This robust method is critical in ARIMA computations
+ * where the normal equations may produce ill-conditioned matrices.
+ *
+ * @param n The dimension of the square matrix.
+ * @param A The input matrix, which is overwritten with the combined L and U factors.
+ * @param pivot An output array holding the pivot indices.
+ * @return 0 on success, nonzero if A is singular.
+ */
+int luDecomposition(int n, double A[n][n], int pivot[n]) {
+    // Initialize the pivot vector with row indices.
+    for (int i = 0; i < n; i++) {
+        pivot[i] = i;
+    }
+    for (int k = 0; k < n; k++) {
+        // Partial pivoting: find the row with the maximum absolute value in column k.
+        double max = fabs(A[k][k]);
+        int maxIndex = k;
+        for (int i = k + 1; i < n; i++) {
+            if (fabs(A[i][k]) > max) {
+                max = fabs(A[i][k]);
+                maxIndex = i;
+            }
+        }
+        DEBUG_PRINT("LU Decomposition: k=%d, maxIndex=%d, max=%lf\n", k, maxIndex, max);
+        if (max < 1e-12) {
+            DEBUG_PRINT("LU Decomposition: Matrix is singular at k=%d\n", k);
+            return -1; // Singular matrix
+        }
+        // Swap rows k and maxIndex if needed.
+        if (maxIndex != k) {
+            for (int j = 0; j < n; j++) {
+                double temp = A[k][j];
+                A[k][j] = A[maxIndex][j];
+                A[maxIndex][j] = temp;
+            }
+            int temp = pivot[k];
+            pivot[k] = pivot[maxIndex];
+            pivot[maxIndex] = temp;
+            DEBUG_PRINT("LU Decomposition: Swapped rows %d and %d\n", k, maxIndex);
+        }
+        // LU update: compute multipliers and update the submatrix.
+        for (int i = k + 1; i < n; i++) {
+            A[i][k] /= A[k][k];
+            for (int j = k + 1; j < n; j++) {
+                A[i][j] -= A[i][k] * A[k][j];
+            }
+        }
+        DEBUG_PRINT("LU Decomposition: Completed column %d\n", k);
+    }
+    return 0;
+}
+
+/**
+ * @brief Solves the system LUx = b using forward and back substitution.
+ *
+ * Given an LU-decomposed matrix (with pivoting) and a right-hand side vector b,
+ * this function computes the solution vector x.
+ *
+ * The solution is obtained in two steps:
+ *   - Forward substitution: Solve Ly = Pb for y.
+ *   - Back substitution: Solve Ux = y for x.
+ *
+ * @param n The dimension of the matrix.
+ * @param LU The LU-decomposed matrix (combined L and U).
+ * @param pivot The pivot indices from LU decomposition.
+ * @param b The right-hand side vector.
+ * @param x Output solution vector.
+ */
+void luSolve(int n, double LU[n][n], int pivot[n], double b[n], double x[n]) {
+    double y[n];
+    // Forward substitution: solve Ly = Pb.
+    for (int i = 0; i < n; i++) {
+        y[i] = b[pivot[i]];  // Apply pivoting.
+        for (int j = 0; j < i; j++) {
+            y[i] -= LU[i][j] * y[j];
+        }
+        DEBUG_PRINT("luSolve Forward: i=%d, y[%d]=%lf\n", i, i, y[i]);
+    }
+    // Back substitution: solve Ux = y.
+    for (int i = n - 1; i >= 0; i--) {
+        x[i] = y[i];
+        for (int j = i + 1; j < n; j++) {
+            x[i] -= LU[i][j] * x[j];
+        }
+        x[i] /= LU[i][i];
+        DEBUG_PRINT("luSolve Backward: i=%d, x[%d]=%lf\n", i, i, x[i]);
+    }
+}
+
+/**
+ * @brief Inverts an n x n matrix using LU decomposition.
+ *
+ * This function first copies the input matrix into a temporary matrix, then performs
+ * LU decomposition with partial pivoting. It then solves n linear systems (one per column)
+ * to compute the inverse column-by-column.
+ *
+ * This LU-based inversion method is preferred over the adjugate method for its improved
+ * numerical stability, particularly when matrices are nearly singular.
+ *
+ * @param n The dimension of the matrix.
+ * @param A The input matrix (n x n).
+ * @param inverse The output inverse matrix (n x n).
+ */
+void invertMatrixLU(int n, double A[n][n], double inverse[n][n]) {
+    int pivot[n];
+    double LU[n][n];
+    // Copy A into LU to preserve the original matrix.
+    for (int i = 0; i < n; i++){
+       for (int j = 0; j < n; j++){
+          LU[i][j] = A[i][j];
+       }
+    }
+    if (luDecomposition(n, LU, pivot) != 0) {
+         fprintf(stderr, "Matrix is singular\n");
+         exit(EXIT_FAILURE);
+    }
+    double b[n], x[n];
+    // Solve for each column of the inverse.
+    for (int j = 0; j < n; j++){
+         // Set b to the jth unit vector.
+         for (int i = 0; i < n; i++){
+             b[i] = 0.0;
+         }
+         b[j] = 1.0;
+         luSolve(n, LU, pivot, b, x);
+         for (int i = 0; i < n; i++){
+             inverse[i][j] = x[i];
+         }
+         DEBUG_PRINT("invertMatrixLU: Solved column %d\n", j);
+    }
+}
+
+/**
+ * @brief Wrapper for inverting a 3x3 matrix using LU decomposition.
+ *
+ * This wrapper ensures that only 3x3 matrices are processed. It calls the LU-based inversion
+ * routine and enforces that the dimension is exactly 3.
+ *
+ * @param n The dimension (must be 3).
+ * @param matrix The input 3x3 matrix.
+ * @param inverseMatrix The output 3x3 inverse matrix.
  */
 void invert3x3Matrix(int n, double matrix[][n], double inverseMatrix[][n]) {
-    double determinant = 0;
-    for (int i = 0; i < n; i++) {
-        determinant += matrix[0][i] * (matrix[1][(i + 1) % 3] * matrix[2][(i + 2) % 3] -
-                                        matrix[1][(i + 2) % 3] * matrix[2][(i + 1) % 3]);
-    }
-    // Check for singularity.
-    if (fabs(determinant) < 1e-8) {
-        fprintf(stderr, "Error: 3x3 matrix is singular (determinant near zero).\n");
+    if (n != 3) {
+        fprintf(stderr, "invert3x3Matrix error: Expected n == 3, got n == %d\n", n);
         exit(EXIT_FAILURE);
     }
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            inverseMatrix[j][i] = (matrix[(i + 1) % 3][(j + 1) % 3] * matrix[(i + 2) % 3][(j + 2) % 3] -
-                                   matrix[(i + 1) % 3][(j + 2) % 3] * matrix[(i + 2) % 3][(j + 1) % 3]) / determinant;
-        }
-    }
+    invertMatrixLU(3, matrix, inverseMatrix);
+    DEBUG_PRINT("invert3x3Matrix: Inversion complete.\n");
 }
 
 /**
- * @brief Inverts a 4x4 matrix.
+ * @brief Wrapper for inverting a 4x4 matrix using LU decomposition.
  *
- * @param matrix Input 4x4 matrix.
- * @param inverse Output inverted 4x4 matrix.
+ * This wrapper calls the LU-based inversion routine for 4x4 matrices and provides
+ * the expected interface for legacy code.
  *
- * @note This function computes the adjugate matrix and divides by the determinant.
- *       If the determinant is near zero, an error is printed and the program exits.
+ * @param matrix The input 4x4 matrix.
+ * @param inverse The output 4x4 inverse matrix.
  */
 void invert4x4Matrix(double matrix[4][4], double inverse[4][4]) {
-    double det;
-    
-    // Compute the cofactors (elements of the adjugate matrix, before transposition)
-    inverse[0][0] = matrix[1][1] * matrix[2][2] * matrix[3][3] -
-                    matrix[1][1] * matrix[2][3] * matrix[3][2] -
-                    matrix[2][1] * matrix[1][2] * matrix[3][3] +
-                    matrix[2][1] * matrix[1][3] * matrix[3][2] +
-                    matrix[3][1] * matrix[1][2] * matrix[2][3] -
-                    matrix[3][1] * matrix[1][3] * matrix[2][2];
-
-    inverse[1][0] = -matrix[1][0] * matrix[2][2] * matrix[3][3] +
-                     matrix[1][0] * matrix[2][3] * matrix[3][2] +
-                     matrix[2][0] * matrix[1][2] * matrix[3][3] -
-                     matrix[2][0] * matrix[1][3] * matrix[3][2] -
-                     matrix[3][0] * matrix[1][2] * matrix[2][3] +
-                     matrix[3][0] * matrix[1][3] * matrix[2][2];
-
-    inverse[2][0] = matrix[1][0] * matrix[2][1] * matrix[3][3] -
-                    matrix[1][0] * matrix[2][3] * matrix[3][1] -
-                    matrix[2][0] * matrix[1][1] * matrix[3][3] +
-                    matrix[2][0] * matrix[1][3] * matrix[3][1] +
-                    matrix[3][0] * matrix[1][1] * matrix[2][3] -
-                    matrix[3][0] * matrix[1][3] * matrix[2][1];
-
-    inverse[3][0] = -matrix[1][0] * matrix[2][1] * matrix[3][2] +
-                     matrix[1][0] * matrix[2][2] * matrix[3][1] +
-                     matrix[2][0] * matrix[1][1] * matrix[3][2] -
-                     matrix[2][0] * matrix[1][2] * matrix[3][1] -
-                     matrix[3][0] * matrix[1][1] * matrix[2][2] +
-                     matrix[3][0] * matrix[1][2] * matrix[2][1];
-
-    inverse[0][1] = -matrix[0][1] * matrix[2][2] * matrix[3][3] +
-                     matrix[0][1] * matrix[2][3] * matrix[3][2] +
-                     matrix[2][1] * matrix[0][2] * matrix[3][3] -
-                     matrix[2][1] * matrix[0][3] * matrix[3][2] -
-                     matrix[3][1] * matrix[0][2] * matrix[2][3] +
-                     matrix[3][1] * matrix[0][3] * matrix[2][2];
-
-    inverse[1][1] = matrix[0][0] * matrix[2][2] * matrix[3][3] -
-                    matrix[0][0] * matrix[2][3] * matrix[3][2] -
-                    matrix[2][0] * matrix[0][2] * matrix[3][3] +
-                    matrix[2][0] * matrix[0][3] * matrix[3][2] +
-                    matrix[3][0] * matrix[0][2] * matrix[2][3] -
-                    matrix[3][0] * matrix[0][3] * matrix[2][2];
-
-    inverse[2][1] = -matrix[0][0] * matrix[2][1] * matrix[3][3] +
-                     matrix[0][0] * matrix[2][3] * matrix[3][1] +
-                     matrix[2][0] * matrix[0][1] * matrix[3][3] -
-                     matrix[2][0] * matrix[0][3] * matrix[3][1] -
-                     matrix[3][0] * matrix[0][1] * matrix[2][3] +
-                     matrix[3][0] * matrix[0][3] * matrix[2][1];
-
-    inverse[3][1] = matrix[0][0] * matrix[2][1] * matrix[3][2] -
-                    matrix[0][0] * matrix[2][2] * matrix[3][1] -
-                    matrix[2][0] * matrix[0][1] * matrix[3][2] +
-                    matrix[2][0] * matrix[0][2] * matrix[3][1] +
-                    matrix[3][0] * matrix[0][1] * matrix[2][2] -
-                    matrix[3][0] * matrix[0][2] * matrix[2][1];
-
-    inverse[0][2] = matrix[0][1] * matrix[1][2] * matrix[3][3] -
-                    matrix[0][1] * matrix[1][3] * matrix[3][2] -
-                    matrix[1][1] * matrix[0][2] * matrix[3][3] +
-                    matrix[1][1] * matrix[0][3] * matrix[3][2] +
-                    matrix[3][1] * matrix[0][2] * matrix[1][3] -
-                    matrix[3][1] * matrix[0][3] * matrix[1][2];
-
-    inverse[1][2] = -matrix[0][0] * matrix[1][2] * matrix[3][3] +
-                     matrix[0][0] * matrix[1][3] * matrix[3][2] +
-                     matrix[1][0] * matrix[0][2] * matrix[3][3] -
-                     matrix[1][0] * matrix[0][3] * matrix[3][2] -
-                     matrix[3][0] * matrix[0][2] * matrix[1][3] +
-                     matrix[3][0] * matrix[0][3] * matrix[1][2];
-
-    inverse[2][2] = matrix[0][0] * matrix[1][1] * matrix[3][3] -
-                    matrix[0][0] * matrix[1][3] * matrix[3][1] -
-                    matrix[1][0] * matrix[0][1] * matrix[3][3] +
-                    matrix[1][0] * matrix[0][3] * matrix[3][1] +
-                    matrix[3][0] * matrix[0][1] * matrix[1][3] -
-                    matrix[3][0] * matrix[0][3] * matrix[1][1];
-
-    inverse[3][2] = -matrix[0][0] * matrix[1][1] * matrix[3][2] +
-                     matrix[0][0] * matrix[1][2] * matrix[3][1] +
-                     matrix[1][0] * matrix[0][1] * matrix[3][2] -
-                     matrix[1][0] * matrix[0][2] * matrix[3][1] -
-                     matrix[3][0] * matrix[0][1] * matrix[1][2] +
-                     matrix[3][0] * matrix[0][2] * matrix[1][1];
-
-    inverse[0][3] = -matrix[0][1] * matrix[1][2] * matrix[2][3] +
-                     matrix[0][1] * matrix[1][3] * matrix[2][2] +
-                     matrix[1][1] * matrix[0][2] * matrix[2][3] -
-                     matrix[1][1] * matrix[0][3] * matrix[2][2] -
-                     matrix[2][1] * matrix[0][2] * matrix[1][3] +
-                     matrix[2][1] * matrix[0][3] * matrix[1][2];
-
-    inverse[1][3] = matrix[0][0] * matrix[1][2] * matrix[2][3] -
-                    matrix[0][0] * matrix[1][3] * matrix[2][2] -
-                    matrix[1][0] * matrix[0][2] * matrix[2][3] +
-                    matrix[1][0] * matrix[0][3] * matrix[2][2] +
-                    matrix[2][0] * matrix[0][2] * matrix[1][3] -
-                    matrix[2][0] * matrix[0][3] * matrix[1][2];
-
-    inverse[2][3] = -matrix[0][0] * matrix[1][1] * matrix[2][3] +
-                     matrix[0][0] * matrix[1][3] * matrix[2][1] +
-                     matrix[1][0] * matrix[0][1] * matrix[2][3] -
-                     matrix[1][0] * matrix[0][3] * matrix[2][1] -
-                     matrix[2][0] * matrix[0][1] * matrix[1][3] +
-                     matrix[2][0] * matrix[0][3] * matrix[1][1];
-
-    inverse[3][3] = matrix[0][0] * matrix[1][1] * matrix[2][2] -
-                    matrix[0][0] * matrix[1][2] * matrix[2][1] -
-                    matrix[1][0] * matrix[0][1] * matrix[2][2] +
-                    matrix[1][0] * matrix[0][2] * matrix[2][1] +
-                    matrix[2][0] * matrix[0][1] * matrix[1][2] -
-                    matrix[2][0] * matrix[0][2] * matrix[1][1];
-
-    // Compute the determinant using the first row and its cofactors.
-    det = matrix[0][0] * inverse[0][0] + matrix[0][1] * inverse[1][0] +
-          matrix[0][2] * inverse[2][0] + matrix[0][3] * inverse[3][0];
-
-    if (fabs(det) < 1e-8) {
-        fprintf(stderr, "Error: Determinant is near zero in invert4x4Matrix.\n");
-        exit(EXIT_FAILURE);
-    }
-    det = 1.0 / det;
-    // Multiply the adjugate matrix by 1/det to obtain the inverse.
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            inverse[i][j] *= det;
-        }
-    }
+    invertMatrixLU(4, matrix, inverse);
+    DEBUG_PRINT("invert4x4Matrix: Inversion complete.\n");
 }
 
+
+/**
+ * @brief Computes the gradient for an MA(1) model's objective function.
+ *
+ * For a moving average model of order 1 (MA(1)), the model is defined as:
+ *   y[i] = theta * lag[i] + c
+ * and the objective function is the sum of squared errors:
+ *   J = sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c))^2.
+ *
+ * The gradients with respect to theta and c are computed as:
+ *   dJ/d(theta) = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c)) * lag[i],
+ *   dJ/d(c)     = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c)).
+ *
+ * DEBUG_PRINT statements output the error and the cumulative gradient for each parameter.
+ *
+ * @param target Pointer to the target vector.
+ * @param lag Pointer to the lagged input vector.
+ * @param n Number of observations.
+ * @param params Current parameter estimates (theta and c).
+ * @param grad Output gradient vector (length 2).
+ */
 void computeMA1Gradient(const double *target, const double *lag, int n, const double params[2], double grad[2]) {
-    // For MA(1): model: y[i] = theta * lag[i] + c
-    // The objective is: J = sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c))^2
-    // Thus, the gradients are:
-    // dJ/d(theta) = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c)) * lag[i]
-    // dJ/d(c)     = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c))
     grad[0] = 0.0;
     grad[1] = 0.0;
     for (int i = 0; i < n; i++) {
@@ -660,16 +682,35 @@ void computeMA1Gradient(const double *target, const double *lag, int n, const do
         double error = target[i] - pred;
         grad[0] += -2.0 * error * lag[i];
         grad[1] += -2.0 * error;
+        DEBUG_PRINT("MA1Grad: i=%d, pred=%lf, error=%lf, grad0_partial=%lf, grad1_partial=%lf\n", 
+                    i, pred, error, grad[0], grad[1]);
     }
+    DEBUG_PRINT("MA1Grad: Final grad[0]=%lf, grad[1]=%lf\n", grad[0], grad[1]);
 }
 
+/**
+ * @brief Computes the gradient for an MA(2) model's objective function.
+ *
+ * For a moving average model of order 2 (MA(2)), the model is defined as:
+ *   y[i] = theta1 * lag1[i] + theta2 * lag2[i] + c
+ * and the objective function is:
+ *   J = sum_{i=0}^{n-1} (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c))^2.
+ *
+ * The gradients are computed as:
+ *   dJ/d(theta1) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag1[i],
+ *   dJ/d(theta2) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag2[i],
+ *   dJ/d(c)      = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)).
+ *
+ * DEBUG_PRINT statements output the error and the cumulative gradient for each parameter.
+ *
+ * @param target Pointer to the target vector.
+ * @param lag1 Pointer to the first lagged input vector.
+ * @param lag2 Pointer to the second lagged input vector.
+ * @param n Number of observations.
+ * @param params Current parameter estimates (theta1, theta2, c).
+ * @param grad Output gradient vector (length 3).
+ */
 void computeMA2Gradient(const double *target, const double *lag1, const double *lag2, int n, const double params[3], double grad[3]) {
-    // For MA(2): model: y[i] = theta1 * lag1[i] + theta2 * lag2[i] + c
-    // Objective: J = sum_{i=0}^{n-1} (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c))^2
-    // Gradients:
-    // dJ/d(theta1) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag1[i]
-    // dJ/d(theta2) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag2[i]
-    // dJ/d(c)      = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c))
     grad[0] = 0.0;
     grad[1] = 0.0;
     grad[2] = 0.0;
@@ -679,7 +720,10 @@ void computeMA2Gradient(const double *target, const double *lag1, const double *
         grad[0] += -2.0 * error * lag1[i];
         grad[1] += -2.0 * error * lag2[i];
         grad[2] += -2.0 * error;
+        DEBUG_PRINT("MA2Grad: i=%d, pred=%lf, error=%lf, grad0_partial=%lf, grad1_partial=%lf, grad2_partial=%lf\n",
+                    i, pred, error, grad[0], grad[1], grad[2]);
     }
+    DEBUG_PRINT("MA2Grad: Final grad[0]=%lf, grad[1]=%lf, grad[2]=%lf\n", grad[0], grad[1], grad[2]);
 }
 
 /*========================================================================
@@ -925,50 +969,69 @@ double computeCorrelation(double array1[], double array2[], int length) {
  * @param length The number of observations.
  * @return The order of differencing (d) applied.
  */
-int DFTest(double series[], double recoveryInfo[], int length) {
-    int diffOrder = 0;
-    double beta, se, tStat;
-    double leadSeries[length - 1], lagSeries[length - 1];
-    // Continue differencing until the t-statistic indicates rejection of the unit root
-    while (length > 3) {
-        // Create lead and lag series (lag=1)
-        calculateLead(series, leadSeries, length, 1);
-        calculateLag(series, lagSeries, length, 1);
-        double* estimates = performUnivariateLinearRegression(lagSeries, leadSeries, length - 1);
-        beta = estimates[0];
-        double intercept = estimates[1];
-        free(estimates);
-        
-        // Compute predictions and residuals
-        double predictions[length - 1];
-        predictUnivariate(lagSeries, predictions, beta, intercept, length - 1);
-        double residuals[length - 1];
-        calculateArrayDifference(leadSeries, predictions, residuals, length - 1);
-        
-        // Estimate variance and standard error of the slope
-        double rss = calculateArraySum(squareArray(residuals, length - 1), length - 1);
-        double s2 = rss / (length - 1 - 2); // degrees of freedom = n-2
-        double meanLag = calculateMean(lagSeries, length - 1);
-        double Sxx = 0.0;
-        for (int i = 0; i < length - 1; i++) {
-            Sxx += (lagSeries[i] - meanLag) * (lagSeries[i] - meanLag);
-        }
-        se = sqrt(s2 / Sxx);
-        tStat = (beta - 1.0) / se;
-        // If tStat is significantly negative (here using -3.0 as a rough cutoff), then reject unit-root.
-        if (tStat < -3.0)
-            break;
-        
-        // Otherwise, difference the series (standard first difference)
-        for (int i = 0; i < length - 1; i++) {
-            series[i] = series[i + 1] - series[i];
-        }
-        recoveryInfo[diffOrder] = series[length - 1]; // save drift info
-        diffOrder++;
-        length -= 1;
+
+// A simplified augmented Dickey–Fuller test that uses a fixed lag order p 
+// (here we choose p = floor((n-1)^(1/3))) and compares the estimated coefficient
+// on y_{t-1} to a fixed critical value.
+// Returns 1 if the null (unit root present) is rejected (i.e. the series is stationary)
+// and 0 otherwise.
+int ADFTest(double series[], int length) {
+    // Determine lag order p, e.g., floor((length-1)^(1/3))
+    int p = (int)floor(pow(length - 1, 1.0/3.0));
+    if (p < 1) p = 1;  // ensure at least one lag
+    int nEff = length - p - 1; // effective number of observations
+
+    // Allocate design matrix X (nEff x (p+2)) and dependent variable vector Y (nEff x 1)
+    // Columns: 0 -> constant, 1 -> y_{t-1}, columns 2...p+1 -> Δy_{t-i} for i=1,...,p.
+    double **X = malloc(nEff * sizeof(double *));
+    double *Y = malloc(nEff * sizeof(double));
+    for (int i = 0; i < nEff; i++) {
+        X[i] = malloc((p + 2) * sizeof(double));
     }
-    return diffOrder;
+
+    // Build the regression data for t = p+1 to length-1.
+    for (int i = 0; i < nEff; i++) {
+        int t = i + p + 1;
+        // Δy_t = y_t - y_{t-1}
+        Y[i] = series[t] - series[t - 1];
+        X[i][0] = 1.0;              // constant
+        X[i][1] = series[t - 1];      // level lagged term
+
+        // Lagged differences: for i = 1...p, Δy_{t-i} = y_{t-i} - y_{t-i-1}
+        for (int j = 1; j <= p; j++) {
+            X[i][j + 1] = series[t - j] - series[t - j - 1];
+        }
+    }
+
+    // Now run OLS regression: Y = X * beta + error.
+    // Here, we use your existing multivariate regression routine.
+    int numPredictors = p + 2;
+    double X_matrix[nEff][numPredictors];
+    double Y_matrix[nEff][1];
+    for (int i = 0; i < nEff; i++) {
+        for (int j = 0; j < numPredictors; j++) {
+            X_matrix[i][j] = X[i][j];
+        }
+        Y_matrix[i][0] = Y[i];
+    }
+    double *beta_est = performMultivariateLinearRegression(nEff, numPredictors, X_matrix, Y_matrix);
+    // In this parameterization, the coefficient on y_{t-1} is beta_est[1].
+    double beta = beta_est[1];
+
+    // Use a placeholder critical value (for example, -3.5) for the test statistic.
+    int reject = (beta < -3.5) ? 1 : 0; // if beta is below critical value, reject unit root
+
+    // Free allocated memory.
+    for (int i = 0; i < nEff; i++) {
+        free(X[i]);
+    }
+    free(X);
+    free(Y);
+    free(beta_est);
+
+    return reject;
 }
+
 
 /**
  * @brief Adjusts a differenced series to recover the original level (drift correction).
@@ -1068,57 +1131,84 @@ void computeEAFMatrix(double series[], double eafMatrix[][3], int length) {
 /**
  * @brief Estimates MA(1) parameters (theta and intercept) using adaptive gradient descent.
  *
- * @param target Pointer to the target array.
- * @param lag Pointer to the lagged error array.
+ * This function minimizes the sum of squared errors for an MA(1) model of the form
+ *   y[i] = theta * lag[i] + c,
+ * with objective
+ *   J = sum_{i=0}^{n-1} (target[i] - (theta*lag[i] + c))^2.
+ *
+ * The gradient is computed for both parameters:
+ *   dJ/d(theta) = -2 * sum (target[i] - (theta*lag[i] + c)) * lag[i]
+ *   dJ/d(c)     = -2 * sum (target[i] - (theta*lag[i] + c))
+ *
+ * An adaptive learning rate is used:
+ *   - If the proposed update reduces J, the learning rate is increased (multiplied by 1.1)
+ *   - Otherwise, the learning rate is decreased (multiplied by 0.5)
+ *
+ * Debug prints trace the gradient norm, learning rate, and objective value.
+ *
+ * @param target Pointer to the target vector.
+ * @param lag Pointer to the lagged error vector.
  * @param n Number of observations.
- * @param theta Output pointer to store the estimated MA coefficient.
- * @param c Output pointer to store the estimated intercept.
+ * @param theta Output pointer for the estimated MA coefficient.
+ * @param c Output pointer for the estimated intercept.
  */
 void estimateMA1Parameters(const double *target, const double *lag, int n, double *theta, double *c) {
-    double maParams[2] = { 0.0, 0.0 };  // [theta, c]
+    double maParams[2] = { 0.0, 0.0 };  // [theta, c] initial guess: 0,0
     double learningRate = INITIAL_MA_LEARNING_RATE;
     int iter = 0;
     double currentObjective = 0.0, newObjective = 0.0;
     double grad[2];
 
-    // Compute initial objective J = sum_{i=0}^{n-1} (target[i] - (theta*lag[i] + c))^2
+    // Compute initial objective J = sum (target - (theta * lag + c))^2
     for (int i = 0; i < n; i++) {
         double pred = maParams[0] * lag[i] + maParams[1];
         double error = target[i] - pred;
         currentObjective += error * error;
     }
+    DEBUG_PRINT("MA1 initial objective: %lf\n", currentObjective);
 
+    // Adaptive gradient descent loop
     while (iter < MAX_ITERATIONS) {
+        // Compute gradient for current parameters
         grad[0] = 0.0; grad[1] = 0.0;
         computeMA1Gradient(target, lag, n, maParams, grad);
         double gradNorm = sqrt(grad[0]*grad[0] + grad[1]*grad[1]);
+        DEBUG_PRINT("MA1 iter %d: grad norm = %lf, learningRate = %lf, currentObjective = %lf\n", iter, gradNorm, learningRate, currentObjective);
         if (gradNorm < CONVERGENCE_TOLERANCE)
             break;
 
+        // Propose an update in the negative gradient direction
         double proposedParams[2];
         proposedParams[0] = maParams[0] - learningRate * grad[0];
         proposedParams[1] = maParams[1] - learningRate * grad[1];
 
+        // Compute the new objective with the proposed parameters
         newObjective = 0.0;
         for (int i = 0; i < n; i++) {
             double pred = proposedParams[0] * lag[i] + proposedParams[1];
             double error = target[i] - pred;
             newObjective += error * error;
         }
+        DEBUG_PRINT("MA1 iter %d: newObjective = %lf\n", iter, newObjective);
 
+        // If improvement is observed, accept the update and slightly increase the learning rate.
         if (newObjective < currentObjective) {
             maParams[0] = proposedParams[0];
             maParams[1] = proposedParams[1];
             currentObjective = newObjective;
-            learningRate *= 1.1;  // increase rate slightly
+            learningRate *= 1.1;
         } else {
-            learningRate *= 0.5;  // decrease rate if no improvement
-            if (learningRate < MIN_MA_LEARNING_RATE)
+            // Otherwise, reduce the learning rate and try again.
+            learningRate *= 0.5;
+            if (learningRate < MIN_MA_LEARNING_RATE) {
+                DEBUG_PRINT("MA1 iter %d: learningRate below minimum threshold, breaking\n", iter);
                 break;
+            }
         }
         iter++;
     }
 
+    DEBUG_PRINT("MA1 final iter %d: theta = %lf, intercept = %lf, objective = %lf\n", iter, maParams[0], maParams[1], currentObjective);
     *theta = maParams[0];
     *c = maParams[1];
 }
@@ -1126,9 +1216,21 @@ void estimateMA1Parameters(const double *target, const double *lag, int n, doubl
 /**
  * @brief Estimates MA(2) parameters (theta1, theta2, and intercept) using adaptive gradient descent.
  *
- * @param target Pointer to the target array.
- * @param lag1 Pointer to the first lagged error array.
- * @param lag2 Pointer to the second lagged error array.
+ * For an MA(2) model of the form
+ *   y[i] = theta1 * lag1[i] + theta2 * lag2[i] + c,
+ * the objective is:
+ *   J = sum_{i=0}^{n-1} (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c))^2.
+ *
+ * The gradients are:
+ *   dJ/d(theta1) = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)) * lag1[i],
+ *   dJ/d(theta2) = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)) * lag2[i],
+ *   dJ/d(c)      = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)).
+ *
+ * An adaptive learning rate is used similarly as in MA(1) estimation.
+ *
+ * @param target Pointer to the target vector.
+ * @param lag1 Pointer to the first lagged error vector.
+ * @param lag2 Pointer to the second lagged error vector.
  * @param n Number of observations.
  * @param theta1 Output pointer for the first MA coefficient.
  * @param theta2 Output pointer for the second MA coefficient.
@@ -1136,23 +1238,26 @@ void estimateMA1Parameters(const double *target, const double *lag, int n, doubl
  */
 void estimateMA2Parameters(const double *target, const double *lag1, const double *lag2, int n,
                            double *theta1, double *theta2, double *c) {
-    double maParams[3] = { 0.0, 0.0, 0.0 };  // [theta1, theta2, c]
+    double maParams[3] = { 0.0, 0.0, 0.0 };  // [theta1, theta2, c] initial guess
     double learningRate = INITIAL_MA_LEARNING_RATE;
     int iter = 0;
     double currentObjective = 0.0, newObjective = 0.0;
     double grad[3];
 
-    // Compute initial objective
+    // Compute initial objective J = sum (target - (theta1*lag1 + theta2*lag2 + c))^2
     for (int i = 0; i < n; i++) {
         double pred = maParams[0] * lag1[i] + maParams[1] * lag2[i] + maParams[2];
         double error = target[i] - pred;
         currentObjective += error * error;
     }
+    DEBUG_PRINT("MA2 initial objective: %lf\n", currentObjective);
 
+    // Adaptive gradient descent loop
     while (iter < MAX_ITERATIONS) {
         grad[0] = grad[1] = grad[2] = 0.0;
         computeMA2Gradient(target, lag1, lag2, n, maParams, grad);
         double gradNorm = sqrt(grad[0]*grad[0] + grad[1]*grad[1] + grad[2]*grad[2]);
+        DEBUG_PRINT("MA2 iter %d: grad norm = %lf, learningRate = %lf, currentObjective = %lf\n", iter, gradNorm, learningRate, currentObjective);
         if (gradNorm < CONVERGENCE_TOLERANCE)
             break;
 
@@ -1167,27 +1272,31 @@ void estimateMA2Parameters(const double *target, const double *lag1, const doubl
             double error = target[i] - pred;
             newObjective += error * error;
         }
+        DEBUG_PRINT("MA2 iter %d: newObjective = %lf\n", iter, newObjective);
 
         if (newObjective < currentObjective) {
+            // Accept the update if objective decreases.
             maParams[0] = proposedParams[0];
             maParams[1] = proposedParams[1];
             maParams[2] = proposedParams[2];
             currentObjective = newObjective;
             learningRate *= 1.1;
         } else {
+            // Otherwise reduce the learning rate.
             learningRate *= 0.5;
-            if (learningRate < MIN_MA_LEARNING_RATE)
+            if (learningRate < MIN_MA_LEARNING_RATE) {
+                DEBUG_PRINT("MA2 iter %d: learningRate below minimum threshold, breaking\n", iter);
                 break;
+            }
         }
         iter++;
     }
 
+    DEBUG_PRINT("MA2 final iter %d: theta1 = %lf, theta2 = %lf, intercept = %lf, objective = %lf\n", iter, maParams[0], maParams[1], maParams[2], currentObjective);
     *theta1 = maParams[0];
     *theta2 = maParams[1];
     *c = maParams[2];
 }
-
-
 
 /**
  * @brief Calculates the Mean Absolute Percentage Error (MAPE).
