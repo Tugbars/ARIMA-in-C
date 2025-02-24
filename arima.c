@@ -977,6 +977,87 @@ double computeCorrelation(double array1[], double array2[], int length) {
   Stationarity Testing and Drift Adjustment
 ========================================================================*/
 
+/**
+ * @brief Differences a time series to achieve stationarity.
+ *
+ * Given an input series and a differencing order d, this function returns a
+ * new dynamically allocated array containing the d-th order differenced series.
+ * The length of the returned series is (original length - d).
+ *
+ * @param series The input time series array.
+ * @param length The number of observations in the input series.
+ * @param d The order of differencing to apply.
+ * @return Pointer to the differenced series. Caller is responsible for freeing the memory.
+ *
+ * @note Differencing is a core step in ARIMA models (the "I" component). This function
+ *       does not automatically determine the optimal d; it assumes d is provided (e.g., via
+ *       iterative testing with an ADF test).
+ */
+double* differenceSeries(const double series[], int length, int d) {
+    if (d < 0 || d >= length) {
+        fprintf(stderr, "Error: Invalid differencing order d=%d for series of length %d.\n", d, length);
+        exit(EXIT_FAILURE);
+    }
+
+    // Allocate a working copy to hold the current version of the series.
+    int currentLength = length;
+    double* current = malloc(sizeof(double) * currentLength);
+    if (!current) {
+        fprintf(stderr, "Memory allocation error in differenceSeries.\n");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < currentLength; i++) {
+        current[i] = series[i];
+    }
+
+    // Apply differencing d times.
+    for (int diff = 0; diff < d; diff++) {
+        int newLength = currentLength - 1;
+        double* temp = malloc(sizeof(double) * newLength);
+        if (!temp) {
+            fprintf(stderr, "Memory allocation error in differenceSeries (temp).\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int i = 0; i < newLength; i++) {
+            temp[i] = current[i + 1] - current[i];
+        }
+        free(current);
+        current = temp;
+        currentLength = newLength;
+    }
+
+    return current; // Length is (length - d)
+}
+
+/**
+ * @brief Integrates a differenced series to recover the original scale.
+ *
+ * Given the forecasted values on the differenced scale and the last observed value
+ * (or a vector of drift/recovery values), this function reconstructs the forecast
+ * on the original scale via cumulative summation.
+ *
+ * @param diffForecast The forecast on the differenced scale.
+ * @param recoveryValue The last observed value of the original series (or the drift vector).
+ * @param forecastLength Number of forecast steps.
+ * @return A new dynamically allocated array containing the integrated (recovered) forecast.
+ *
+ * @note For one order of differencing, the integration is essentially:
+ *       forecast_original[0] = recoveryValue + diffForecast[0]
+ *       forecast_original[i] = forecast_original[i-1] + diffForecast[i]
+ */
+double* integrateSeries(const double diffForecast[], double recoveryValue, int forecastLength) {
+    double* integrated = malloc(sizeof(double) * forecastLength);
+    if (!integrated) {
+        fprintf(stderr, "Memory allocation error in integrateSeries.\n");
+        exit(EXIT_FAILURE);
+    }
+    integrated[0] = recoveryValue + diffForecast[0];
+    for (int i = 1; i < forecastLength; i++) {
+        integrated[i] = integrated[i - 1] + diffForecast[i];
+    }
+    return integrated;
+}
+
 /* --- New constants for the extended ADF test --- */
 #define MODEL_CONSTANT_ONLY 0
 #define MODEL_CONSTANT_TREND 1
@@ -1047,40 +1128,51 @@ double autocorrelation(const double series[], int n, int lag) {
  * @param pValue Output pointer for the approximate p-value.
  * @return 1 if the null (unit root present) is rejected (i.e. series is stationary), 0 otherwise.
  */
-int ADFTestExtended(double series[], int length, int maxLag, int modelType, double *tStat, double *pValue) {
+int ADFTestExtendedAutoLag(double series[], int length, int modelType, double *tStat, double *pValue) {
+    // Common rule-of-thumb for ADF test:
+    int pMax = (int)floor(pow(length - 1, ADF_LAG_EXPONENT));
+    if (pMax < 0) pMax = 0;  // safety check
+
     int bestP = 0;
     double bestAIC = 1e30;
     double bestBeta = 0.0;
 
-    // Try lag orders from 0 to maxLag
-    for (int p = 0; p <= maxLag; p++) {
-        int nEff = length - p - 1; // effective sample size
+    for (int p = 0; p <= pMax; p++) {
+        int nEff = length - p - 1; 
         int k = 2 + p; // constant and lagged level plus p lagged differences
         if (modelType == MODEL_CONSTANT_TREND) {
-            k += 1; // add trend
+            k += 1; // add trend term if requested
         }
-        // Allocate design matrix X (nEff x k) and response vector Y (nEff)
+        if (nEff < k + 1) {
+            // If you don't have enough data points to fit these many parameters, break/continue.
+            // or you can skip this p if nEff < k+1. 
+            // We'll just break here for simplicity:
+            break;
+        }
+
         double X[nEff][k];
         double Y[nEff];
 
-        // Build regression data: for t = p+1 ... length-1
+        // Build the ADF regression design for t = p+1 ... length-1
         for (int i = 0; i < nEff; i++) {
             int t = i + p + 1;
-            Y[i] = series[t] - series[t - 1]; // Δy_t
+            Y[i] = series[t] - series[t - 1]; // Δy_t = y_t - y_{t-1}
             int col = 0;
-            X[i][col++] = 1.0;            // constant
-            X[i][col++] = series[t - 1];    // level lagged term
+            X[i][col++] = 1.0;           // constant
+            X[i][col++] = series[t - 1]; // lagged level (y_{t-1})
             if (modelType == MODEL_CONSTANT_TREND) {
-                X[i][col++] = (double)t;  // time trend (or t - (p+1) to center)
+                X[i][col++] = (double)t; // optional trend: e.g. t or (t - p - 1)
             }
-            // Lagged differences:
+            // p lagged differences
             for (int j = 1; j <= p; j++) {
                 X[i][col++] = series[t - j] - series[t - j - 1];
             }
         }
-        // Run OLS regression (use our multivariate linear regression)
+
+        // OLS
         double *betaEst = performMultivariateLinearRegression(nEff, k, X, (double (*)[1])Y);
-        // Compute predicted values and RSS
+
+        // Compute RSS
         double RSS = 0.0;
         for (int i = 0; i < nEff; i++) {
             double pred = 0.0;
@@ -1090,19 +1182,23 @@ int ADFTestExtended(double series[], int length, int maxLag, int modelType, doub
             double err = Y[i] - pred;
             RSS += err * err;
         }
-        double AIC = nEff * log(RSS / nEff) + 2 * k;
+
+        // AIC = nEff * ln(RSS/nEff) + 2*k
+        double AIC = nEff * log(RSS / nEff) + 2.0 * k;
+
         if (AIC < bestAIC) {
             bestAIC = AIC;
-            bestP = p;
-            bestBeta = betaEst[1]; // beta (coefficient on y_{t-1})
+            bestP   = p;
+            bestBeta = betaEst[1]; // The coefficient on y_{t-1}
         }
         free(betaEst);
     }
-    // For simplicity, we use the best (lowest AIC) model’s beta coefficient as the test statistic.
-    *tStat = bestBeta;
+
+    // Now we have bestBeta from the best (lowest AIC) model
+    *tStat  = bestBeta;
     *pValue = adfPValue(bestBeta, modelType);
-    // Reject unit root (i.e. stationarity) if bestBeta is below the critical value
-    // (using our approximated p-value; here we reject if pValue < 0.05)
+
+    // Stationary if pValue < 0.05, for example
     return (*pValue < 0.05) ? 1 : 0;
 }
 
@@ -1309,7 +1405,7 @@ void computeEAFMatrix(double series[], double eafMatrix[][3], int length) {
 }
 
 /*========================================================================
-  Error Metrics
+  Error Metrics & Moving Average
 ========================================================================*/
 
 #define INITIAL_MA_LEARNING_RATE 0.001
@@ -1833,13 +1929,58 @@ void recoverForecast(double forecastDiff[], double recoveryValues[], double fina
     }
 }
 
+/**
+ * @brief Prepares a series for ARMA modeling by testing for stationarity using the extended ADF test.
+ *
+ * This function iteratively differences the input series until the series is deemed stationary
+ * (according to the extended ADF test with automatic lag selection) or until a maximum differencing order is reached.
+ *
+ * @param series The original time series.
+ * @param length The length of the original series.
+ * @param maxDiffOrder Maximum differencing order to try.
+ * @param modelType Set to MODEL_CONSTANT_ONLY or MODEL_CONSTANT_TREND for the ADF test.
+ * @param outDiffOrder (Output) The order of differencing that was applied.
+ * @param outNewLength (Output) The length of the differenced series.
+ * @return Pointer to the differenced series (which should be stationary). Caller is responsible for freeing the memory.
+ */
+double* prepareSeriesForARMA(const double series[], int length, int maxDiffOrder, int modelType, int *outDiffOrder, int *outNewLength) {
+    int d = 0;
+    int currentLength = length;
+    double *currentSeries = malloc(sizeof(double) * currentLength);
+    if (!currentSeries) {
+        fprintf(stderr, "Memory allocation error in prepareSeriesForARMA.\n");
+        exit(EXIT_FAILURE);
+    }
+    memcpy(currentSeries, series, sizeof(double) * currentLength);
+
+    double tStat, pValue;
+    // Use the auto-lag version of the ADF test.
+    int isStationary = ADFTestExtendedAutoLag(currentSeries, currentLength, modelType, &tStat, &pValue);
+    
+    // While the series is not stationary and we haven't reached the maximum differencing order,
+    // difference the series one time and retest.
+    while (!isStationary && d < maxDiffOrder) {
+        d++;
+        double *temp = differenceSeries(currentSeries, currentLength, 1);
+        free(currentSeries);
+        currentSeries = temp;
+        currentLength--;  // each differencing reduces length by 1
+        isStationary = ADFTestExtendedAutoLag(currentSeries, currentLength, modelType, &tStat, &pValue);
+    }
+
+    *outDiffOrder = d;
+    *outNewLength = currentLength;
+    return currentSeries;
+}
+
+
 /*========================================================================
   Main Function (for testing purposes)
 ========================================================================*/
 
 int main(void) {
-    double sampleData[] = {8.0, 4.0, 2.0, 4.0, 3.0, 2.0, 4.0, 2.0, 3.0, 3.0,
-                            3.0, 1.0, 3.0, 1.0, 2.0, 2.0, 4.0, 5.0, 4.0, 1.0};
+    double sampleData[] = {10.544653, 10.688583, 10.666841, 10.662732, 10.535033, 10.612065, 10.577628, 10.524487, 10.511290, 10.520899, 10.605484, 10.506456, 10.693456, 10.667562, 10.640863, 10.553473, 10.684760, 10.752397, 10.671068, 10.667091, 10.641893, 10.625706, 10.701795, 10.607544, 10.689169, 10.695256, 10.717050, 10.677475, 10.691141, 10.730298, 10.732664, 10.710082, 10.713123, 10.759815, 10.696599, 10.663845, 10.716597, 10.780855, 10.795759, 10.802620, 10.720496, 10.753401, 10.709436, 10.746909, 10.737377, 10.754609, 10.765248, 10.692602, 10.837926, 10.755324, 10.756213, 10.843190, 10.862529, 10.751269, 10.902390, 10.817731, 10.859796, 10.887362, 10.835401, 10.824412, 10.860767, 10.819504, 10.907496, 10.831528, 10.821727, 10.830010, 10.915317, 10.858694, 10.921139, 10.927524, 10.894352, 10.889785, 10.956356, 10.938758, 11.093567, 10.844841, 11.094493, 11.035941, 10.982765, 11.071057, 10.996308, 11.099276, 11.142057, 11.137176, 11.157537, 11.007247, 11.144075, 11.183029, 11.172096, 11.164571, 11.192833, 11.227109, 11.141589, 11.311490, 11.239783, 11.295933, 11.199566, 11.232262, 11.333208, 11.337874, 11.322334, 11.288216, 11.280459, 11.247973, 11.288277, 11.415095, 11.297583, 11.360763, 11.288338, 11.434631, 11.456051, 11.578981, 11.419166, 11.478404, 11.660141, 11.544303, 11.652028, 11.638368, 11.651792, 11.621518, 11.763853, 11.760687, 11.771138, 11.678104, 11.783163, 11.932094, 11.948678, 11.962627, 11.937934, 12.077570, 11.981595, 12.096366, 12.032683, 12.094221, 11.979764, 12.217793, 12.235930, 12.129859, 12.411867, 12.396301, 12.413920, 12.445867, 12.480462, 12.470674, 12.537774, 12.562252, 12.810248, 12.733546, 12.861890, 12.918012, 13.033087, 13.245610, 13.184196, 13.414342, 13.611838, 13.626345, 13.715446, 13.851129, 14.113374, 14.588537, 14.653982, 15.250756, 15.618371, 16.459558, 18.144264, 23.523062, 40.229511, 38.351265, 38.085281, 37.500885, 37.153946, 36.893066, 36.705956, 36.559536, 35.938847, 36.391586, 36.194046, 36.391586, 36.119102, 35.560543, 35.599018, 34.958851, 35.393860, 34.904797, 35.401318, 34.863518, 34.046680, 34.508522, 34.043182, 34.704235, 33.556644, 33.888481, 33.533638, 33.452129, 32.930935, 32.669731, 32.772537, 32.805634, 32.246761, 32.075809, 31.864927, 31.878294, 32.241131, 31.965626, 31.553604, 30.843288, 30.784569, 31.436094, 31.170496, 30.552132, 30.500242, 30.167421, 29.911989, 29.586046, 29.478958, 29.718994, 29.611095, 29.557945, 28.463432, 29.341291, 28.821512, 28.447210, 27.861872, 27.855633, 27.910660, 28.425800, 27.715517, 27.617193, 27.093372, 26.968832, 26.977205, 27.170172, 26.251677, 26.633236, 26.224941, 25.874708, 25.593761, 26.392395, 24.904768, 25.331600, 24.530737, 25.074808, 25.310865, 24.337013, 24.442986, 24.500193, 24.130409, 24.062714, 24.064592, 23.533037, 23.977909, 22.924667, 22.806379, 23.130791, 22.527645, 22.570505, 22.932512, 22.486126, 22.594856, 22.383926, 22.115181, 22.105082, 21.151754, 21.074114, 21.240192, 20.977468, 20.771507, 21.184586, 20.495111, 20.650751, 20.656075, 20.433039, 20.005697, 20.216360, 19.982117, 19.703951, 19.572884, 19.332155, 19.544645, 18.666328, 19.219872, 18.934229, 19.186989, 18.694986, 18.096903, 18.298306, 17.704309, 18.023785, 18.224157, 18.182484, 17.642824, 17.739542, 17.474176, 17.270575, 17.604120, 17.631210, 16.639175, 17.107626, 17.024216, 16.852285, 16.780111, 16.838861, 16.539309, 16.092861, 16.131529, 16.221350, 16.087164, 15.821659, 15.695448, 15.693087, 16.047991, 15.682863, 15.724131, 15.263708, 15.638486, 15.443835, 15.602257, 15.122874, 14.918172, 14.968882, 14.843689, 14.861169, 15.052527, 15.056897, 14.690192, 14.686479, 14.567565, 14.365212, 14.253309, 14.289158, 14.227124, 14.069589, 14.074703, 13.869432, 13.861959, 13.782178, 13.882711, 13.908362, 13.727641, 13.600214, 13.594969, 13.535290, 13.602018, 13.502626, 13.579159, 13.207825, 13.426789, 13.178141, 13.286413, 12.958746, 13.189507, 13.079733, 13.138372, 12.986096, 12.854589, 12.858962, 12.903029, 12.852099, 12.644394, 12.558786, 12.636994};
+    
     int dataLength = sizeof(sampleData) / sizeof(sampleData[0]);
     
     // Validate input length.
@@ -1856,7 +1997,7 @@ int main(void) {
     free(lr1Estimates);
     
     // Forecast using AR(1)
-    double* ar1Forecast = forecastAR1(sampleData, dataLength);
+    double* ar1Forecast = forecastAR1(sampleData, 183);
     printf("AR(1) Forecast: ");
     for (int i = 0; i < 17; i++) {
         printf("%lf ", ar1Forecast[i]);
@@ -1877,11 +2018,10 @@ int main(void) {
     // For AR(1), one parameter is estimated; test using 10 lags.
     checkResidualDiagnostics(residuals, newLength, 10, 1);
     
-    free(ar1Forecast);
-    
+ 
     // Forecast using AR(1)-MA(2) hybrid model.
-    double* ar1ma2Forecast = forecastAR1MA2(sampleData, dataLength);
-    printf("AR(1)-MA(2) Forecast: ");
+    double* ar1ma2Forecast = forecastAR1MA1(sampleData, 183);
+    printf("AR(1)-MA(1) Forecast: ");
     for (int i = 0; i < 17; i++) {
         printf("%lf ", ar1ma2Forecast[i]);
     }
