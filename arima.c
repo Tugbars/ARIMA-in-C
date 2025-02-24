@@ -977,76 +977,228 @@ double computeCorrelation(double array1[], double array2[], int length) {
   Stationarity Testing and Drift Adjustment
 ========================================================================*/
 
-/**
- * @brief Performs a Dickey–Fuller style test to determine the order of differencing required for stationarity.
- *
- * @param series The input time series (will be modified in-place).
- * @param recoveryInfo Output array storing the last value of the series at each differencing step.
- * @param length The number of observations.
- * @return The order of differencing (d) applied.
- */
+/* --- New constants for the extended ADF test --- */
+#define MODEL_CONSTANT_ONLY 0
+#define MODEL_CONSTANT_TREND 1
 
-// A simplified augmented Dickey–Fuller test that uses a fixed lag order p 
-// (here we choose p = floor((n-1)^(1/3))) and compares the estimated coefficient
-// on y_{t-1} to a fixed critical value.
-// Returns 1 if the null (unit root present) is rejected (i.e. the series is stationary)
-// and 0 otherwise.
-int ADFTest(double series[], int length) {
-    // Determine lag order p, e.g., floor((length-1)^(1/3))
-    int p = (int)floor(pow(length - 1, ADF_LAG_EXPONENT));
-    if (p < 1) p = 1;  // ensure at least one lag
-    int nEff = length - p - 1; // effective number of observations
+// Critical values for ADF test (approximate) for the intercept-only model:
+static const double ADF_CRIT_CONSTANT[3] = { -3.43, -2.86, -2.57 }; // 1%, 5%, 10% levels
+// Critical values for ADF test with constant and trend:
+static const double ADF_CRIT_TREND[3] = { -4.15, -3.41, -3.12 }; // 1%, 5%, 10% levels
 
-    // Allocate design matrix X (nEff x (p+2)) and dependent variable vector Y (nEff x 1)
-    // Columns: 0 -> constant, 1 -> y_{t-1}, columns 2...p+1 -> Δy_{t-i} for i=1,...,p.
-    double **X = malloc(nEff * sizeof(double *));
-    double *Y = malloc(nEff * sizeof(double));
-    for (int i = 0; i < nEff; i++) {
-        X[i] = malloc((p + 2) * sizeof(double));
+/* --- Helper function: Approximate p-value from ADF test statistic --- */
+double adfPValue(double tstat, int modelType) {
+    // For simplicity, we do piecewise linear interpolation.
+    // If tstat is below the 1% critical value, return 0.005; if above 10%, return 0.15.
+    const double *cv = (modelType == MODEL_CONSTANT_TREND) ? ADF_CRIT_TREND : ADF_CRIT_CONSTANT;
+    const double pvals[3] = { 0.01, 0.05, 0.10 };
+    if (tstat <= cv[0])
+        return 0.005;
+    if (tstat >= cv[2])
+        return 0.15;
+    if (tstat <= cv[1]) {
+        double frac = (tstat - cv[0]) / (cv[1] - cv[0]);
+        return pvals[0] + frac * (pvals[1] - pvals[0]);
+    } else { // between cv[1] and cv[2]
+        double frac = (tstat - cv[1]) / (cv[2] - cv[1]);
+        return pvals[1] + frac * (pvals[2] - pvals[1]);
     }
-
-    // Build the regression data for t = p+1 to length-1.
-    for (int i = 0; i < nEff; i++) {
-        int t = i + p + 1;
-        // Δy_t = y_t - y_{t-1}
-        Y[i] = series[t] - series[t - 1];
-        X[i][0] = 1.0;              // constant
-        X[i][1] = series[t - 1];      // level lagged term
-
-        // Lagged differences: for i = 1...p, Δy_{t-i} = y_{t-i} - y_{t-i-1}
-        for (int j = 1; j <= p; j++) {
-            X[i][j + 1] = series[t - j] - series[t - j - 1];
-        }
-    }
-
-    // Now run OLS regression: Y = X * beta + error.
-    // Here, we use your existing multivariate regression routine.
-    int numPredictors = p + 2;
-    double X_matrix[nEff][numPredictors];
-    double Y_matrix[nEff][1];
-    for (int i = 0; i < nEff; i++) {
-        for (int j = 0; j < numPredictors; j++) {
-            X_matrix[i][j] = X[i][j];
-        }
-        Y_matrix[i][0] = Y[i];
-    }
-    double *beta_est = performMultivariateLinearRegression(nEff, numPredictors, X_matrix, Y_matrix);
-    // In this parameterization, the coefficient on y_{t-1} is beta_est[1].
-    double beta = beta_est[1];
-
-    // Use a placeholder critical value (for example, -3.5) for the test statistic.
-    int reject = (beta < ADF_CRITICAL_VALUE) ? 1 : 0; // if beta is below critical value, reject unit root
-
-    // Free allocated memory.
-    for (int i = 0; i < nEff; i++) {
-        free(X[i]);
-    }
-    free(X);
-    free(Y);
-    free(beta_est);
-
-    return reject;
 }
+
+/* --- Helper functions for the extended ADF test --- */
+
+// Compute autocorrelation for a lag (simple implementation)
+double autocorrelation(const double series[], int n, int lag) {
+    double mean = 0.0;
+    for (int i = 0; i < n; i++)
+        mean += series[i];
+    mean /= n;
+    double num = 0.0, den = 0.0;
+    for (int i = 0; i < n - lag; i++) {
+        num += (series[i] - mean) * (series[i + lag] - mean);
+    }
+    for (int i = 0; i < n; i++) {
+        double diff = series[i] - mean;
+        den += diff * diff;
+    }
+    return num / den;
+}
+
+/* --- Extended ADF test function --- */
+/**
+ * @brief Extended Augmented Dickey–Fuller test.
+ *
+ * This function performs an augmented Dickey–Fuller regression with a flexible lag order
+ * chosen by AIC minimization and with an option to include a trend term.
+ *
+ * The regression model is:
+ *    Δy_t = α + β * y_{t-1} + [δ * t] + Σ_{i=1}^{p} γ_i Δy_{t-i} + ε_t
+ *
+ * where p is chosen (0 ≤ p ≤ maxLag) by selecting the model with the smallest AIC.
+ *
+ * The test statistic is taken as the estimated coefficient on y_{t-1} (β). An approximate
+ * p-value is computed using pre-stored critical values.
+ *
+ * @param series The input time series (length observations).
+ * @param length The length of the series.
+ * @param maxLag Maximum lag to consider for the augmentation.
+ * @param modelType Set to MODEL_CONSTANT_ONLY (0) for constant only, or MODEL_CONSTANT_TREND (1) for constant and trend.
+ * @param tStat Output pointer for the estimated test statistic (β).
+ * @param pValue Output pointer for the approximate p-value.
+ * @return 1 if the null (unit root present) is rejected (i.e. series is stationary), 0 otherwise.
+ */
+int ADFTestExtended(double series[], int length, int maxLag, int modelType, double *tStat, double *pValue) {
+    int bestP = 0;
+    double bestAIC = 1e30;
+    double bestBeta = 0.0;
+
+    // Try lag orders from 0 to maxLag
+    for (int p = 0; p <= maxLag; p++) {
+        int nEff = length - p - 1; // effective sample size
+        int k = 2 + p; // constant and lagged level plus p lagged differences
+        if (modelType == MODEL_CONSTANT_TREND) {
+            k += 1; // add trend
+        }
+        // Allocate design matrix X (nEff x k) and response vector Y (nEff)
+        double X[nEff][k];
+        double Y[nEff];
+
+        // Build regression data: for t = p+1 ... length-1
+        for (int i = 0; i < nEff; i++) {
+            int t = i + p + 1;
+            Y[i] = series[t] - series[t - 1]; // Δy_t
+            int col = 0;
+            X[i][col++] = 1.0;            // constant
+            X[i][col++] = series[t - 1];    // level lagged term
+            if (modelType == MODEL_CONSTANT_TREND) {
+                X[i][col++] = (double)t;  // time trend (or t - (p+1) to center)
+            }
+            // Lagged differences:
+            for (int j = 1; j <= p; j++) {
+                X[i][col++] = series[t - j] - series[t - j - 1];
+            }
+        }
+        // Run OLS regression (use our multivariate linear regression)
+        double *betaEst = performMultivariateLinearRegression(nEff, k, X, (double (*)[1])Y);
+        // Compute predicted values and RSS
+        double RSS = 0.0;
+        for (int i = 0; i < nEff; i++) {
+            double pred = 0.0;
+            for (int j = 0; j < k; j++) {
+                pred += betaEst[j] * X[i][j];
+            }
+            double err = Y[i] - pred;
+            RSS += err * err;
+        }
+        double AIC = nEff * log(RSS / nEff) + 2 * k;
+        if (AIC < bestAIC) {
+            bestAIC = AIC;
+            bestP = p;
+            bestBeta = betaEst[1]; // beta (coefficient on y_{t-1})
+        }
+        free(betaEst);
+    }
+    // For simplicity, we use the best (lowest AIC) model’s beta coefficient as the test statistic.
+    *tStat = bestBeta;
+    *pValue = adfPValue(bestBeta, modelType);
+    // Reject unit root (i.e. stationarity) if bestBeta is below the critical value
+    // (using our approximated p-value; here we reject if pValue < 0.05)
+    return (*pValue < 0.05) ? 1 : 0;
+}
+
+/* --- Chi-square CDF implementation for the Ljung-Box test --- */
+/**
+ * @brief Computes the regularized lower incomplete gamma function P(a, x).
+ *
+ * This implementation uses a series expansion for x < a+1 and a continued fraction for x >= a+1.
+ *
+ * @param a Parameter a.
+ * @param x Parameter x.
+ * @return The regularized lower incomplete gamma function P(a, x).
+ */
+double gammaP(double a, double x) {
+    const int ITMAX = 100;
+    const double EPS = 3.0e-7;
+    double gln = lgamma(a);
+    if (x < a + 1.0) {
+        // Series expansion
+        double sum = 1.0 / a;
+        double del = sum;
+        for (int n = 1; n <= ITMAX; n++) {
+            a += 1.0;
+            del *= x / a;
+            sum += del;
+            if (fabs(del) < fabs(sum)*EPS) break;
+        }
+        return sum * exp(-x + (a - 1)*log(x) - gln);
+    } else {
+        // Continued fraction
+        double b = x + 1.0 - a;
+        double c = 1.0 / 1.0e-30;
+        double d = 1.0 / b;
+        double h = d;
+        for (int n = 1; n <= ITMAX; n++) {
+            double an = -n * (n - a);
+            b += 2.0;
+            d = an * d + b;
+            if (fabs(d) < 1.0e-30) d = 1.0e-30;
+            c = b + an / c;
+            if (fabs(c) < 1.0e-30) c = 1.0e-30;
+            d = 1.0 / d;
+            double delta = d * c;
+            h *= delta;
+            if (fabs(delta - 1.0) < EPS) break;
+        }
+        return 1.0 - h * exp(-x + (a - 1)*log(x) - gln);
+    }
+}
+
+/**
+ * @brief Computes the chi-square CDF for x with k degrees of freedom.
+ *
+ * @param x The chi-square statistic.
+ * @param k Degrees of freedom.
+ * @return The CDF value.
+ */
+double chiSquareCDF(double x, int k) {
+    return gammaP(k / 2.0, x / 2.0);
+}
+
+/* --- Ljung–Box test functions --- */
+/**
+ * @brief Computes the Ljung–Box Q-statistic for a series of residuals.
+ *
+ * @param residuals The residuals from the model.
+ * @param n The number of residuals.
+ * @param h The number of lags to include in the test.
+ * @return The Ljung–Box Q-statistic.
+ */
+double ljungBoxQ(const double residuals[], int n, int h) {
+    double Q = 0.0;
+    for (int k = 1; k <= h; k++) {
+        double r = autocorrelation(residuals, n, k);
+        Q += r * r / (n - k);
+    }
+    Q *= n * (n + 2);
+    return Q;
+}
+
+/**
+ * @brief Computes the Ljung–Box test p-value.
+ *
+ * @param residuals The residuals from the model.
+ * @param n The number of residuals.
+ * @param h The number of lags used in the test.
+ * @param m The number of parameters estimated in the model (used to adjust degrees of freedom).
+ * @return The approximate p-value.
+ */
+double ljungBoxPValue(const double residuals[], int n, int h, int m) {
+    double Q = ljungBoxQ(residuals, n, h);
+    int df = h - m; // degrees of freedom
+    double p = 1.0 - chiSquareCDF(Q, df);
+    return p;
+}
+
 
 
 /**
@@ -1062,6 +1214,25 @@ void adjustDrift(double originalSeries[], double adjustedSeries[], int length, i
         for (int j = 0; j < (length - diffOrder); j++) {
             adjustedSeries[j] = adjustedSeries[j + diffOrder] - adjustedSeries[j];
         }
+    }
+}
+
+/**
+ * @brief Helper function to check residual diagnostics via the Ljung–Box test.
+ *
+ * If the p-value is below 0.05, a warning is printed.
+ *
+ * @param residuals The residuals.
+ * @param n Number of residuals.
+ * @param h Number of lags for the test.
+ * @param m Number of estimated parameters.
+ */
+void checkResidualDiagnostics(const double residuals[], int n, int h, int m) {
+    double pVal = ljungBoxPValue(residuals, n, h, m);
+    if (pVal < 0.05) {
+        printf("Warning: Residuals exhibit significant autocorrelation (Ljung–Box p = %.4lf).\n", pVal);
+    } else {
+        printf("Residuals pass the Ljung–Box test (p = %.4lf).\n", pVal);
     }
 }
 
@@ -1693,6 +1864,21 @@ int main(void) {
     printf("\n");
     free(ar1Forecast);
     
+    /* --- Compute AR(1) residuals and run Ljung–Box test --- */
+    int newLength = dataLength - 1;
+    double predictions[newLength];
+    double* regEst = performUnivariateLinearRegression(sampleData, sampleData + 1, newLength);
+    double phi = regEst[0];
+    double intercept = regEst[1];
+    predictUnivariate(sampleData, predictions, phi, intercept, newLength);
+    double residuals[newLength];
+    calculateArrayDifference(sampleData + 1, predictions, residuals, newLength);
+    free(regEst);
+    // For AR(1), one parameter is estimated; test using 10 lags.
+    checkResidualDiagnostics(residuals, newLength, 10, 1);
+    
+    free(ar1Forecast);
+    
     // Forecast using AR(1)-MA(2) hybrid model.
     double* ar1ma2Forecast = forecastAR1MA2(sampleData, dataLength);
     printf("AR(1)-MA(2) Forecast: ");
@@ -1706,4 +1892,3 @@ int main(void) {
     
     return 0;
 }
-
