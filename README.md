@@ -9,20 +9,20 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 ### What It Does
 
 - **Univariate Regression (LR1):**  
-  The function first centers the data by subtracting the means of the predictor and response. Then it computes the standard deviations and uses the Pearson correlation coefficient to determine the slope ($\beta$) via the relationship  
+  The function first centers the data by subtracting the means of the predictor and response. Then it computes the standard deviations and uses the Pearson correlation coefficient to determine the slope (β) via the relationship:
 
-  $$
-  \beta = \text{Corr} \times \frac{S_y}{S_x}
-  $$
+  ![Equation](https://latex.codecogs.com/png.latex?\beta%20%3D%20\text{Corr}%20\times%20\frac{S_y}{S_x})
 
-  and the intercept as  
+  and the intercept as:
 
-  $$
-  \text{intercept} = \bar{y} - \beta\,\bar{x}
-  $$
+  ![Equation](https://latex.codecogs.com/png.latex?\text{intercept}%20%3D%20\bar{y}%20-%20\beta\bar{x})
 
 - **Bivariate and Multivariate Regression (LR2, LRM):**  
-  For two or more predictors, the code computes the necessary sums and products (or uses normalized design matrices) to derive closed-form expressions based on covariances. In the multivariate case, the normal equations $X^\top X \beta = X^\top Y$ are solved via matrix inversion (using LU decomposition for small matrices, e.g., $3 \times 3$ or $4 \times 4$).
+  For two or more predictors, the code computes the necessary sums and products (or uses normalized design matrices) to derive closed-form expressions based on covariances. In the multivariate case, the normal equations:
+
+  ![Equation](https://latex.codecogs.com/png.latex?X^\top%20X%20\beta%20%3D%20X^\top%20Y)
+
+  are solved via matrix inversion (using LU decomposition for small matrices, e.g., 3×3 or 4×4).
 
 - **Correlation Function (Corr):**  
   The Pearson correlation between two arrays is computed by centering the data, calculating the sum of the product of deviations, and then normalizing by the product of the standard deviations.
@@ -52,10 +52,11 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 ### What It Does
 
 - **ADF Test (DFTest):**  
-  The implementation uses an augmented Dickey–Fuller (ADF) test to determine the necessary order of differencing ($d$) to achieve stationarity. The test iteratively:
+  The implementation uses an augmented Dickey–Fuller (ADF) test to determine the necessary order of differencing \(d\) to achieve stationarity. The test iteratively:
   1. Creates a lagged and a lead version of the series.
   2. Regresses the lead on the lagged series using LR1.
-  3. Checks whether the estimated coefficient is “close enough” to unity ($\pm 1.001$ tolerance).  
+  3. Checks whether the estimated coefficient is “close enough” to unity (±1.001 tolerance).  
+
   If not, the series is differenced (each iteration reduces the series length by one), and the test is repeated.
 
 - **Drift Adjustment:**  
@@ -64,7 +65,7 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 ### Why It’s Done This Way
 
 - **Ensuring Stationarity:**  
-  ARIMA modeling assumes that the time series is stationary. By automatically applying the ADF test and differencing until stationarity is reached, the implementation avoids manual selection of $d$ and adapts to the input data.
+  ARIMA modeling assumes that the time series is stationary. By automatically applying the ADF test and differencing until stationarity is reached, the implementation avoids manual selection of \(d\) and adapts to the input data.
 
 - **Simple and Iterative:**  
   The iterative differencing and testing approach is straightforward to implement and understand, even though more sophisticated methods (like KPSS or information criterion-based selection) exist.
@@ -76,69 +77,36 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
   - Maintains simplicity and transparency.
 
 - **Downside:**  
-  - The use of a fixed tolerance ($\pm 1.001$) and a simple piecewise linear approximation for p-values means that the test might be less robust than state-of-the-art methods.  
+  - The use of a fixed tolerance (±1.001) and a simple piecewise linear approximation for p-values means that the test might be less robust than state-of-the-art methods.  
   - Over-differencing is a risk if the rule-of-thumb does not capture the true dynamics of the series.
 
 ---
 
-## 3. Diagnostic Matrix (EAFMatrix)
-
-### What It Does
-
-- **Extended Autocorrelation Function Matrix:**  
-  This component computes a $3 \times 3$ matrix of extended autocorrelations that serves as a diagnostic tool. The steps include:
-  1. Calculating correlations between the original series and various shifted versions (leads/lags).
-  2. Fitting an AR(1) model (using LR1) and then computing the autocorrelations of the model’s errors.
-  3. Repeating the process for an AR(2) model.
-
-  The resulting matrix encapsulates information about the serial dependence structure of the data.
-
-### Why It’s Done This Way
-
-- **Model Selection Aid:**  
-  The extended autocorrelation function (EAF) matrix provides diagnostic information that can be used to select the most appropriate forecasting model by comparing error autocorrelations from different AR orders.
-
-### Upsides and Downsides
-
-- **Upside:**  
-  - Provides a clear, numerical diagnostic that can guide model selection.
-
-- **Downside:**  
-  - The process is computationally intensive (since it involves repeated regressions) and relies on the stability of OLS estimates.
-
----
-
-## 4. Forecasting Models
+## 3. Forecasting Models
 
 ### What They Do
 
 - **AR(1) Forecasting:**  
-  The AR(1) model is estimated by regressing $y_t$ on $y_{t-1}$. Forecasts are then generated recursively using:
+  The AR(1) model is estimated by regressing \( y_t \) on \( y_{t-1} \). Forecasts are then generated recursively using:
 
-  $$
-  \hat{y}_{t+h} = \phi^h y_t + \left(1 + \phi + \phi^2 + \cdots + \phi^{h-1}\right) \text{intercept}
-  $$
+  ![Equation](https://latex.codecogs.com/png.latex?\hat{y}_{t%2Bh}%20%3D%20\phi^h%20y_t%20%2B%20\left(1%20%2B%20\phi%20%2B%20\phi^2%20%2B%20\cdots%20%2B%20\phi^{h-1}\right)%20\text{intercept})
 
   Additionally, an in-sample forecast error variance is computed as a measure of forecast uncertainty.
 
 - **Hybrid AR(1)-MA(1) and AR(1)-MA(2) Models:**  
-  For these models, the AR part is estimated via the above OLS method. The moving average (MA) parameters are then estimated using an adaptive gradient descent algorithm.  
+  For these models, the AR part is estimated via the above OLS method. The moving average (MA) parameters are then estimated using an adaptive gradient descent algorithm.
 
   - **Gradient Descent for MA Estimation:**  
     The objective function is the sum of squared forecast errors on the differenced series:
 
-    $$
-    J(\theta, c) = \sum_{i} \left(y_i - (\theta \times \text{lag}[i] + c)\right)^2
-    $$
+    ![Equation](https://latex.codecogs.com/png.latex?J(\theta%2C%20c)%20%3D%20\sum_{i}%20\left(y_i%20-%20(\theta%20\times%20\text{lag}[i]%20%2B%20c)\right)^2.)
 
-    The gradients with respect to $\theta$ and $c$ are computed, and an adaptive learning rate is used:
-    - If the update reduces $J$, the learning rate is increased.
+    The gradients with respect to \(\theta\) and \(c\) are computed, and an adaptive learning rate is used:
+    - If the update reduces \(J\), the learning rate is increased.
     - Otherwise, it is decreased.
 
-### Why It’s Done This Way
-
-- **Separation of AR and MA Components:**  
-  AR parameters are estimated using well-understood OLS methods, while MA parameters—which lack closed-form solutions—are estimated via gradient descent.
+- **Forecast Recovery:**  
+  When differencing is applied to the series (to achieve stationarity), forecasts are initially generated on the differenced scale. The `recoverForecast()` function integrates these forecasts (via cumulative summation) and adds back drift information so that the final predictions are on the original scale.
 
 ### Upsides and Downsides
 
@@ -149,5 +117,3 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 - **Downside:**  
   - The separate estimation of AR and MA components may introduce bias compared to a full maximum likelihood joint estimation.  
   - The gradient descent algorithm can be sensitive to initial conditions, learning rate adjustments, and may converge slowly in some cases.
-
----
