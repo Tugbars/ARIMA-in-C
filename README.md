@@ -155,15 +155,3 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
   • The gradient descent algorithm can be sensitive to initial conditions, learning rate adjustments, and may converge slowly in some cases.
 
 ---
-
-## Conclusion
-
-This ARIMA implementation in C is designed to strike a balance between mathematical rigor and computational simplicity. Key decisions include:
-
-- **Using closed-form OLS regression** for estimating the AR portion, leveraging data centering and normalization to improve numerical stability.
-- **Applying iterative differencing based on the ADF test** to ensure stationarity, which is critical for valid ARIMA modeling.
-- **Employing an adaptive gradient descent scheme** for estimating the MA parameters—acknowledging the inherent nonlinearity in the MA part of the model.
-- **Constructing diagnostic matrices (EAF)** and using error metrics (MAPE and MAE) to guide model selection and assess forecast quality.
-- **Generating recursive forecasts** and then integrating differenced forecasts to recover the original scale.
-
----
