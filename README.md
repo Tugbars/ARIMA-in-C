@@ -1,7 +1,3 @@
-Below is a cohesive explanation of the mathematical and algorithmic design decisions taken in this ARIMA implementation. You can use it as your README content on GitHub to explain why the code is structured this way and what it achieves.
-
----
-
 # ARIMA Implementation – Design Decisions and Rationale
 
 This implementation of ARIMA forecasting in C takes a modular approach that splits the problem into several mathematically and algorithmically distinct steps. Below we explain each major component, the decisions made during implementation, and the benefits and drawbacks of these choices.
@@ -169,9 +165,5 @@ This ARIMA implementation in C is designed to strike a balance between mathemati
 - **Employing an adaptive gradient descent scheme** for estimating the MA parameters—acknowledging the inherent nonlinearity in the MA part of the model.
 - **Constructing diagnostic matrices (EAF)** and using error metrics (MAPE and MAE) to guide model selection and assess forecast quality.
 - **Generating recursive forecasts** and then integrating differenced forecasts to recover the original scale.
-
-While there are many ways to implement ARIMA models, this approach was chosen for its modularity, ease of understanding, and practicality when working with moderate-size datasets. It is not without limitations—especially in the separate estimation of AR and MA components—but it provides a clear and maintainable framework that can be extended or refined as needed.
-
-Feel free to use this explanation as your README documentation to provide context and insight into the design decisions behind this ARIMA implementation.
 
 ---
