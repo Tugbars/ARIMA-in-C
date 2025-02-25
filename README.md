@@ -11,16 +11,16 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 - **Univariate Regression (LR1):**  
   The function first centers the data by subtracting the means of the predictor and response. Then it computes the standard deviations and uses the Pearson correlation coefficient to determine the slope (β) via the relationship:
 
-  ![Equation](https://latex.codecogs.com/png.latex?\beta%20%3D%20\text{Corr}%20\times%20\frac{S_y}{S_x})
+  ![Equation](https://latex.codecogs.com/svg.latex?\beta%20%3D%20\text{Corr}%20\times%20\frac{S_y}{S_x})
 
   and the intercept as:
 
-  ![Equation](https://latex.codecogs.com/png.latex?\text{intercept}%20%3D%20\bar{y}%20-%20\beta\bar{x})
+  ![Equation](https://latex.codecogs.com/svg.latex?\text{intercept}%20%3D%20\bar{y}%20-%20\beta\bar{x})
 
 - **Bivariate and Multivariate Regression (LR2, LRM):**  
   For two or more predictors, the code computes the necessary sums and products (or uses normalized design matrices) to derive closed-form expressions based on covariances. In the multivariate case, the normal equations:
 
-  ![Equation](https://latex.codecogs.com/png.latex?X^\top%20X%20\beta%20%3D%20X^\top%20Y)
+  ![Equation](https://latex.codecogs.com/svg.latex?X^\top%20X%20\beta%20%3D%20X^\top%20Y)
 
   are solved via matrix inversion (using LU decomposition for small matrices, e.g., 3×3 or 4×4).
 
@@ -70,16 +70,6 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 - **Simple and Iterative:**  
   The iterative differencing and testing approach is straightforward to implement and understand, even though more sophisticated methods (like KPSS or information criterion-based selection) exist.
 
-### Upsides and Downsides
-
-- **Upside:**  
-  - Automatic, rule-of-thumb method for determining differencing order.  
-  - Maintains simplicity and transparency.
-
-- **Downside:**  
-  - The use of a fixed tolerance (±1.001) and a simple piecewise linear approximation for p-values means that the test might be less robust than state-of-the-art methods.  
-  - Over-differencing is a risk if the rule-of-thumb does not capture the true dynamics of the series.
-
 ---
 
 ## 3. Forecasting Models
@@ -89,7 +79,7 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 - **AR(1) Forecasting:**  
   The AR(1) model is estimated by regressing \( y_t \) on \( y_{t-1} \). Forecasts are then generated recursively using:
 
-  ![Equation](https://latex.codecogs.com/png.latex?\hat{y}_{t%2Bh}%20%3D%20\phi^h%20y_t%20%2B%20\left(1%20%2B%20\phi%20%2B%20\phi^2%20%2B%20\cdots%20%2B%20\phi^{h-1}\right)%20\text{intercept})
+  ![Equation](https://latex.codecogs.com/svg.latex?\hat{y}_{t%2Bh}%20%3D%20\phi^h%20y_t%20%2B%20\left(1%20%2B%20\phi%20%2B%20\phi^2%20%2B%20\cdots%20%2B%20\phi^{h-1}\right)%20\text{intercept})
 
   Additionally, an in-sample forecast error variance is computed as a measure of forecast uncertainty.
 
@@ -99,7 +89,7 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
   - **Gradient Descent for MA Estimation:**  
     The objective function is the sum of squared forecast errors on the differenced series:
 
-    ![Equation](https://latex.codecogs.com/png.latex?J(\theta%2C%20c)%20%3D%20\sum_{i}%20\left(y_i%20-%20(\theta%20\times%20\text{lag}[i]%20%2B%20c)\right)^2.)
+    ![Equation](https://latex.codecogs.com/svg.latex?J(\theta%2C%20c)%20%3D%20\sum_{i}%20\left(y_i%20-%20(\theta%20\times%20\text{lag}[i]%20%2B%20c)\right)^2.)
 
     The gradients with respect to \(\theta\) and \(c\) are computed, and an adaptive learning rate is used:
     - If the update reduces \(J\), the learning rate is increased.
@@ -107,13 +97,3 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 
 - **Forecast Recovery:**  
   When differencing is applied to the series (to achieve stationarity), forecasts are initially generated on the differenced scale. The `recoverForecast()` function integrates these forecasts (via cumulative summation) and adds back drift information so that the final predictions are on the original scale.
-
-### Upsides and Downsides
-
-- **Upside:**  
-  - The AR part is estimated robustly via OLS.  
-  - The use of adaptive gradient descent for the MA part is straightforward and adaptable to small datasets.
-
-- **Downside:**  
-  - The separate estimation of AR and MA components may introduce bias compared to a full maximum likelihood joint estimation.  
-  - The gradient descent algorithm can be sensitive to initial conditions, learning rate adjustments, and may converge slowly in some cases.
