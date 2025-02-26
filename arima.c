@@ -167,6 +167,10 @@
 // Exponent used in computing the lag order for the ADF test (e.g., p = floor((n-1)^(1/3)) ).
 #define ADF_LAG_EXPONENT (1.0 / 3.0)
 
+#define INITIAL_MA_LEARNING_RATE 0.001
+#define MIN_MA_LEARNING_RATE 1e-6
+
+
 #ifdef DEBUG
 #define DEBUG_PRINT(...) printf(__VA_ARGS__)
 #else
@@ -1547,196 +1551,6 @@ void computeEAFMatrix(double series[], double eafMatrix[][3], int length)
   Error Metrics & Moving Average
 ========================================================================*/
 
-#define INITIAL_MA_LEARNING_RATE 0.001
-#define MIN_MA_LEARNING_RATE 1e-6
-
-/**
- * @brief Estimates MA(1) parameters (theta and intercept) using adaptive gradient descent.
- *
- * This function minimizes the sum of squared errors for an MA(1) model of the form
- *   y[i] = theta * lag[i] + c,
- * with objective
- *   J = sum_{i=0}^{n-1} (target[i] - (theta*lag[i] + c))^2.
- *
- * The gradient is computed for both parameters:
- *   dJ/d(theta) = -2 * sum (target[i] - (theta*lag[i] + c)) * lag[i]
- *   dJ/d(c)     = -2 * sum (target[i] - (theta*lag[i] + c))
- *
- * An adaptive learning rate is used:
- *   - If the proposed update reduces J, the learning rate is increased (multiplied by 1.1)
- *   - Otherwise, the learning rate is decreased (multiplied by 0.5)
- *
- * Debug prints trace the gradient norm, learning rate, and objective value.
- *
- * @param target Pointer to the target vector.
- * @param lag Pointer to the lagged error vector.
- * @param n Number of observations.
- * @param theta Output pointer for the estimated MA coefficient.
- * @param c Output pointer for the estimated intercept.
- */
-void estimateMA1Parameters(const double *target, const double *lag, int n, double *theta, double *c)
-{
-  double maParams[2] = {0.0, 0.0}; // [theta, c] initial guess: 0,0
-  double learningRate = INITIAL_MA_LEARNING_RATE;
-  int iter = 0;
-  double currentObjective = 0.0, newObjective = 0.0;
-  double grad[2];
-
-  // Compute initial objective J = sum (target - (theta * lag + c))^2
-  for (int i = 0; i < n; i++)
-  {
-    double pred = maParams[0] * lag[i] + maParams[1];
-    double error = target[i] - pred;
-    currentObjective += error * error;
-  }
-  DEBUG_PRINT("MA1 initial objective: %lf\n", currentObjective);
-
-  // Adaptive gradient descent loop
-  while (iter < MAX_ITERATIONS)
-  {
-    // Compute gradient for current parameters
-    grad[0] = 0.0;
-    grad[1] = 0.0;
-    computeMA1Gradient(target, lag, n, maParams, grad);
-    double gradNorm = sqrt(grad[0] * grad[0] + grad[1] * grad[1]);
-    DEBUG_PRINT("MA1 iter %d: grad norm = %lf, learningRate = %lf, currentObjective = %lf\n", iter, gradNorm, learningRate, currentObjective);
-    if (gradNorm < CONVERGENCE_TOLERANCE)
-      break;
-
-    // Propose an update in the negative gradient direction
-    double proposedParams[2];
-    proposedParams[0] = maParams[0] - learningRate * grad[0];
-    proposedParams[1] = maParams[1] - learningRate * grad[1];
-
-    // Compute the new objective with the proposed parameters
-    newObjective = 0.0;
-    for (int i = 0; i < n; i++)
-    {
-      double pred = proposedParams[0] * lag[i] + proposedParams[1];
-      double error = target[i] - pred;
-      newObjective += error * error;
-    }
-    DEBUG_PRINT("MA1 iter %d: newObjective = %lf\n", iter, newObjective);
-
-    // If improvement is observed, accept the update and slightly increase the learning rate.
-    if (newObjective < currentObjective)
-    {
-      maParams[0] = proposedParams[0];
-      maParams[1] = proposedParams[1];
-      currentObjective = newObjective;
-      learningRate *= 1.1;
-    }
-    else
-    {
-      // Otherwise, reduce the learning rate and try again.
-      learningRate *= 0.5;
-      if (learningRate < MIN_MA_LEARNING_RATE)
-      {
-        DEBUG_PRINT("MA1 iter %d: learningRate below minimum threshold, breaking\n", iter);
-        break;
-      }
-    }
-    iter++;
-  }
-
-  DEBUG_PRINT("MA1 final iter %d: theta = %lf, intercept = %lf, objective = %lf\n", iter, maParams[0], maParams[1], currentObjective);
-  *theta = maParams[0];
-  *c = maParams[1];
-}
-
-/**
- * @brief Estimates MA(2) parameters (theta1, theta2, and intercept) using adaptive gradient descent.
- *
- * For an MA(2) model of the form
- *   y[i] = theta1 * lag1[i] + theta2 * lag2[i] + c,
- * the objective is:
- *   J = sum_{i=0}^{n-1} (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c))^2.
- *
- * The gradients are:
- *   dJ/d(theta1) = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)) * lag1[i],
- *   dJ/d(theta2) = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)) * lag2[i],
- *   dJ/d(c)      = -2 * sum (target[i] - (theta1*lag1[i] + theta2*lag2[i] + c)).
- *
- * An adaptive learning rate is used similarly as in MA(1) estimation.
- *
- * @param target Pointer to the target vector.
- * @param lag1 Pointer to the first lagged error vector.
- * @param lag2 Pointer to the second lagged error vector.
- * @param n Number of observations.
- * @param theta1 Output pointer for the first MA coefficient.
- * @param theta2 Output pointer for the second MA coefficient.
- * @param c Output pointer for the intercept.
- */
-void estimateMA2Parameters(const double *target, const double *lag1, const double *lag2, int n,
-                           double *theta1, double *theta2, double *c)
-{
-  double maParams[3] = {0.0, 0.0, 0.0}; // [theta1, theta2, c] initial guess
-  double learningRate = INITIAL_MA_LEARNING_RATE;
-  int iter = 0;
-  double currentObjective = 0.0, newObjective = 0.0;
-  double grad[3];
-
-  // Compute initial objective J = sum (target - (theta1*lag1 + theta2*lag2 + c))^2
-  for (int i = 0; i < n; i++)
-  {
-    double pred = maParams[0] * lag1[i] + maParams[1] * lag2[i] + maParams[2];
-    double error = target[i] - pred;
-    currentObjective += error * error;
-  }
-  DEBUG_PRINT("MA2 initial objective: %lf\n", currentObjective);
-
-  // Adaptive gradient descent loop
-  while (iter < MAX_ITERATIONS)
-  {
-    grad[0] = grad[1] = grad[2] = 0.0;
-    computeMA2Gradient(target, lag1, lag2, n, maParams, grad);
-    double gradNorm = sqrt(grad[0] * grad[0] + grad[1] * grad[1] + grad[2] * grad[2]);
-    DEBUG_PRINT("MA2 iter %d: grad norm = %lf, learningRate = %lf, currentObjective = %lf\n", iter, gradNorm, learningRate, currentObjective);
-    if (gradNorm < CONVERGENCE_TOLERANCE)
-      break;
-
-    double proposedParams[3];
-    proposedParams[0] = maParams[0] - learningRate * grad[0];
-    proposedParams[1] = maParams[1] - learningRate * grad[1];
-    proposedParams[2] = maParams[2] - learningRate * grad[2];
-
-    newObjective = 0.0;
-    for (int i = 0; i < n; i++)
-    {
-      double pred = proposedParams[0] * lag1[i] + proposedParams[1] * lag2[i] + proposedParams[2];
-      double error = target[i] - pred;
-      newObjective += error * error;
-    }
-    DEBUG_PRINT("MA2 iter %d: newObjective = %lf\n", iter, newObjective);
-
-    if (newObjective < currentObjective)
-    {
-      // Accept the update if objective decreases.
-      maParams[0] = proposedParams[0];
-      maParams[1] = proposedParams[1];
-      maParams[2] = proposedParams[2];
-      currentObjective = newObjective;
-      learningRate *= 1.1;
-    }
-    else
-    {
-      // Otherwise reduce the learning rate.
-      learningRate *= 0.5;
-      if (learningRate < MIN_MA_LEARNING_RATE)
-      {
-        DEBUG_PRINT("MA2 iter %d: learningRate below minimum threshold, breaking\n", iter);
-        break;
-      }
-    }
-    iter++;
-  }
-
-  DEBUG_PRINT("MA2 final iter %d: theta1 = %lf, theta2 = %lf, intercept = %lf, objective = %lf\n", iter, maParams[0], maParams[1], maParams[2], currentObjective);
-  *theta1 = maParams[0];
-  *theta2 = maParams[1];
-  *c = maParams[2];
-}
-
 /**
  * @brief Calculates the Mean Absolute Percentage Error (MAPE).
  *
@@ -1823,270 +1637,6 @@ double *forecastAR1(double series[], int length)
   return forecast;
 }
 
-/*========================================================================
-  Forecasting Model: AR(1)-MA(1) Hybrid (Example)
-========================================================================*/
-
-/**
- * @brief Forecasts future values using an AR(1)-MA(1) hybrid model.
- *
- * @param series The input time series.
- * @param length The length of the series.
- * @return A dynamically allocated forecast array (FORECAST_HORIZON amount of forecasts and MAPE).
- *
- * This example model combines autoregressive and moving average components.
- * It involves an iterative procedure to update the MA parameters until convergence.
- * (For brevity, this example uses a univariate update to refine two parameters.)
- */
-double *forecastAR1MA1(double series[], int length)
-{
-  // Build differenced series for AR estimation
-  int diffLength = length - 2;
-  double diffSeries[diffLength], diffSeriesLag1[diffLength], diffSeriesLag2[diffLength];
-  calculateLead(series, diffSeries, length, 2);
-  double tempArray[length];
-  calculateLead(series, tempArray, length, 1);
-  calculateLag(tempArray, diffSeriesLag1, length, 1);
-  calculateLag(series, diffSeriesLag2, length, 2);
-
-  // Estimate AR parameters via bivariate regression on the differenced series
-  double *ar2Estimates = performBivariateLinearRegression(diffSeriesLag1, diffSeriesLag2, diffSeries, diffLength);
-  double ar2Beta1 = ar2Estimates[0],
-         ar2Beta2 = ar2Estimates[1],
-         ar2Intercept = ar2Estimates[2];
-  free(ar2Estimates);
-
-  // Compute AR predictions and errors on the differenced series
-  double diffSeriesPred[diffLength];
-  predictBivariate(diffSeriesLag1, diffSeriesLag2, diffSeriesPred, ar2Beta1, ar2Beta2, ar2Intercept, diffLength);
-  double diffError[diffLength];
-  calculateArrayDifference(diffSeries, diffSeriesPred, diffError, diffLength);
-
-  // Prepare arrays for MA estimation: shift diffSeries to create "arComponent" and error lag
-  int maLength = diffLength - 1;
-  double arComponent[maLength], errorLag[maLength];
-  calculateLead(diffSeries, arComponent, diffLength, 1);
-  calculateLag(diffError, errorLag, diffLength, 1);
-
-  // Now use adaptive MA(1) estimation:
-  double estimatedTheta, estimatedC;
-  estimateMA1Parameters(errorLag, arComponent, maLength, &estimatedTheta, &estimatedC);
-
-  // Generate a simple recursive forecast (here we produce FORECAST_HORIZON amount of forecast values)
-  double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
-  if (!forecast)
-    exit(EXIT_FAILURE);
-  // For example, use the last error value to produce a one‐step forecast:
-  double lastError = errorLag[maLength - 1];
-  forecast[0] = estimatedTheta * lastError + estimatedC;
-  // Here we simply replicate the forecast recursively (adjust as needed)
-  for (int i = 1; i < FORECAST_HORIZON; i++)
-  {
-    forecast[i] = forecast[i - 1];
-  }
-  // Compute and store a placeholder MAPE in forecast[FORECAST_HORIZON]
-  double mapeValue = calculateMAPE(arComponent, diffSeriesPred, maLength);
-  forecast[FORECAST_HORIZON] = mapeValue;
-  return forecast;
-}
-
-/**
- * @brief Forecasts future values using an AR(1)–MA(2) hybrid model.
- *
- * @param series The input time series.
- * @param seriesLength The number of observations in the series.
- * @return A pointer to a dynamically allocated forecast array (first FORECAST_HORIZON forecasts; element FORECAST_HORIZON holds MAPE).
- *
- * This function performs the following steps:
- *   1. Constructs a differenced series for the AR component.
- *   2. Builds a design matrix from several lagged versions of the differenced series and estimates AR parameters.
- *   3. Computes AR prediction errors.
- *   4. Prepares a design matrix for MA estimation.
- *   5. Iteratively refines MA parameters.
- *   6. Generates recursive forecasts using the hybrid model.
- */
-double *forecastAR1MA2(double series[], int seriesLength)
-{
-  // Step 1: Build differenced series for AR estimation.
-  int arDataLength = seriesLength - 3;
-  double diffSeries[arDataLength], lag1Diff[arDataLength], lag2Diff[arDataLength], lag3Diff[arDataLength];
-  calculateLeadWithLag(series, diffSeries, seriesLength, 0, 3);
-  calculateLeadWithLag(series, lag1Diff, seriesLength, 1, 2);
-  calculateLeadWithLag(series, lag2Diff, seriesLength, 2, 1);
-  calculateLeadWithLag(series, lag3Diff, seriesLength, 3, 0);
-
-  // Step 2: Estimate AR parameters using multivariate regression.
-  int numARPredictors = 3;
-  double arDesign[arDataLength][3];
-  double arResponse[arDataLength][1];
-  arrayToMatrix(arDataLength, diffSeries, arResponse);
-  columnBind3(arDataLength, lag1Diff, lag2Diff, lag3Diff, arDesign);
-  double *arEstimates = performMultivariateLinearRegression(arDataLength, numARPredictors, arDesign, arResponse);
-  double phi1 = arEstimates[0],
-         phi2 = arEstimates[1],
-         phi3 = arEstimates[2],
-         AR_intercept = arEstimates[3];
-  free(arEstimates);
-
-  // Step 3: Compute AR prediction errors.
-  double arPredicted[arDataLength][1];
-  for (int i = 0; i < arDataLength; i++)
-  {
-    arPredicted[i][0] = arDesign[i][0] * phi1 + arDesign[i][1] * phi2 + arDesign[i][2] * phi3 + AR_intercept;
-  }
-  double arError[arDataLength];
-  for (int i = 0; i < arDataLength; i++)
-  {
-    arError[i] = arResponse[i][0] - arPredicted[i][0];
-  }
-
-  // Step 4: Prepare data for MA estimation.
-  int maDataLength = arDataLength - 2;
-  double targetSeries[maDataLength], targetLag[maDataLength];
-  double errorLag1[maDataLength], errorLag2[maDataLength];
-  calculateLeadWithLag(diffSeries, targetSeries, arDataLength, 0, 2);
-  calculateLeadWithLag(diffSeries, targetLag, arDataLength, 1, 1);
-  calculateLeadWithLag(arError, errorLag1, arDataLength, 1, 1);
-  calculateLeadWithLag(arError, errorLag2, arDataLength, 2, 0);
-
-  // Step 5: Instead of using regression, apply adaptive MA(2) estimation:
-  double estimatedTheta1, estimatedTheta2, estimatedMAIntercept;
-  estimateMA2Parameters(targetSeries, errorLag1, errorLag2, maDataLength,
-                        &estimatedTheta1, &estimatedTheta2, &estimatedMAIntercept);
-
-  // Step 6: Generate recursive forecasts.
-  double forecastMAPE = calculateMAPE(targetSeries, targetSeries, maDataLength); // placeholder
-  double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
-  if (!forecast)
-    exit(EXIT_FAILURE);
-  double lastValue = targetSeries[maDataLength - 1];
-  for (int i = 0; i < FORECAST_HORIZON; i++)
-  {
-    forecast[i] = estimatedTheta1 * lastValue +
-                  estimatedTheta2 * errorLag2[maDataLength - 1] +
-                  estimatedMAIntercept;
-    lastValue = forecast[i];
-  }
-  forecast[FORECAST_HORIZON] = forecastMAPE;
-  return forecast;
-}
-
-/*========================================================================
-  Forecasting Model: AR(2)-MA(1) and AR(2)-MA(2)
-========================================================================*/
-
-double *forecastAR2MA1(double series[], int seriesLength)
-{
-  int numPredictors = 2; // For AR(2)
-  int arDataLength = seriesLength - 2;
-  double diffSeries[arDataLength];
-  calculateLead(series, diffSeries, seriesLength, 1);
-
-  double arLag1[arDataLength - 1], arLag2[arDataLength - 1], arResponse[arDataLength - 1];
-  calculateLag(diffSeries, arResponse, arDataLength, 1);
-  calculateLead(diffSeries, arLag1, arDataLength, 1);
-  calculateLead(diffSeries, arLag2, arDataLength, 2);
-
-  double *arEstimates = performBivariateLinearRegression(arLag1, arLag2, arResponse, arDataLength - 1);
-  double phi1 = arEstimates[0],
-         phi2 = arEstimates[1],
-         AR_intercept = arEstimates[2];
-  free(arEstimates);
-
-  double arPred[arDataLength - 1];
-  for (int i = 0; i < arDataLength - 1; i++)
-  {
-    arPred[i] = arLag1[i] * phi1 + arLag2[i] * phi2 + AR_intercept;
-  }
-  double arError[arDataLength - 1];
-  for (int i = 0; i < arDataLength - 1; i++)
-  {
-    arError[i] = arResponse[i] - arPred[i];
-  }
-
-  int maDataLength = (arDataLength - 1) - 1;
-  double maTarget[maDataLength], maLag[maDataLength];
-  calculateLead(arError, maTarget, arDataLength - 1, 0);
-  calculateLag(arError, maLag, arDataLength - 1, 1);
-
-  // Use adaptive MA(1) estimation:
-  double estimatedTheta, estimatedMAIntercept;
-  estimateMA1Parameters(maLag, maTarget, maDataLength, &estimatedTheta, &estimatedMAIntercept);
-
-  double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
-  if (!forecast)
-    exit(EXIT_FAILURE);
-  double lastARValue = arResponse[arDataLength - 2];
-  double lastError = arError[arDataLength - 2];
-  for (int i = 0; i < FORECAST_HORIZON; i++)
-  {
-    forecast[i] = lastARValue * phi1 + lastARValue * phi2 +
-                  estimatedMAIntercept + estimatedTheta * lastError;
-    lastARValue = forecast[i];
-  }
-  forecast[FORECAST_HORIZON] = calculateMAPE(arResponse, arPred, arDataLength - 1);
-  return forecast;
-}
-
-/*========================================================================
-  Forecasting Model: AR(2)-MA(2) Hybrid
-========================================================================*/
-
-double *forecastAR2MA2(double series[], int seriesLength)
-{
-  int numPredictors = 2; // For AR(2)
-  int arDataLength = seriesLength - 2;
-  double diffSeries[arDataLength];
-  calculateLead(series, diffSeries, seriesLength, 1);
-
-  double arLag1[arDataLength - 1], arLag2[arDataLength - 1], arResponse[arDataLength - 1];
-  calculateLag(diffSeries, arResponse, arDataLength, 1);
-  calculateLead(diffSeries, arLag1, arDataLength, 1);
-  calculateLead(diffSeries, arLag2, arDataLength, 2);
-
-  double *arEstimates = performBivariateLinearRegression(arLag1, arLag2, arResponse, arDataLength - 1);
-  double phi1 = arEstimates[0],
-         phi2 = arEstimates[1],
-         AR_intercept = arEstimates[2];
-  free(arEstimates);
-
-  double arPred[arDataLength - 1];
-  for (int i = 0; i < arDataLength - 1; i++)
-  {
-    arPred[i] = arLag1[i] * phi1 + arLag2[i] * phi2 + AR_intercept;
-  }
-  double arError[arDataLength - 1];
-  for (int i = 0; i < arDataLength - 1; i++)
-  {
-    arError[i] = arResponse[i] - arPred[i];
-  }
-
-  int maDataLength = (arDataLength - 1) - 1;
-  double maTarget[maDataLength], maLag1[maDataLength], maLag2[maDataLength];
-  calculateLead(arError, maTarget, arDataLength - 1, 0);
-  calculateLag(arError, maLag1, arDataLength - 1, 1);
-  calculateLag(arError, maLag2, arDataLength - 1, 2);
-
-  // Use adaptive MA(2) estimation:
-  double estimatedTheta1, estimatedTheta2, estimatedMAIntercept;
-  estimateMA2Parameters(maTarget, maLag1, maLag2, maDataLength,
-                        &estimatedTheta1, &estimatedTheta2, &estimatedMAIntercept);
-
-  double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
-  if (!forecast)
-    exit(EXIT_FAILURE);
-  double lastValue = maTarget[maDataLength - 1];
-  for (int i = 0; i < FORECAST_HORIZON; i++)
-  {
-    forecast[i] = lastValue * phi1 + lastValue * phi2 +
-                  estimatedMAIntercept + estimatedTheta1 * maLag1[maDataLength - 1] +
-                  estimatedTheta2 * maLag2[maDataLength - 1];
-    lastValue = forecast[i];
-  }
-  forecast[FORECAST_HORIZON] = calculateMAPE(maTarget, maTarget, maDataLength); // placeholder
-  return forecast;
-}
-
 /**
  * @brief Recovers forecasted values to the original scale by adding back drift.
  *
@@ -2160,6 +1710,505 @@ double *prepareSeriesForARMA(const double series[], int length, int maxDiffOrder
   return currentSeries;
 }
 
+
+/**
+ * @brief Computes the autocorrelation function (ACF) up to a specified maximum lag.
+ *
+ * @param series The input time series.
+ * @param length The number of observations in the series.
+ * @param maxLag The maximum lag for which to compute the ACF.
+ * @param acf Output array of length (maxLag + 1) where acf[lag] is the autocorrelation at that lag.
+ */
+void computeACF(const double series[], int length, int maxLag, double acf[]) {
+    double mean = calculateMean(series, length);
+    double denom = 0.0;
+    for (int i = 0; i < length; i++) {
+        double diff = series[i] - mean;
+        denom += diff * diff;
+    }
+    for (int lag = 0; lag <= maxLag; lag++) {
+        double num = 0.0;
+        for (int i = 0; i < length - lag; i++) {
+            num += (series[i] - mean) * (series[i + lag] - mean);
+        }
+        acf[lag] = num / denom;
+    }
+}
+
+/**
+ * @brief Computes the partial autocorrelation function (PACF) using the Levinson–Durbin recursion.
+ *
+ * @param series The input time series.
+ * @param length The number of observations.
+ * @param maxLag The maximum lag for which to compute the PACF.
+ * @param pacf Output array of length (maxLag + 1) where pacf[lag] is the PACF at that lag.
+ *
+ * @note The PACF at lag 0 is conventionally set to 1.
+ */
+void computePACF(const double series[], int length, int maxLag, double pacf[]) {
+    double *acf = malloc(sizeof(double) * (maxLag + 1));
+    if (!acf) {
+        fprintf(stderr, "Memory allocation error in computePACF.\n");
+        exit(EXIT_FAILURE);
+    }
+    computeACF(series, length, maxLag, acf);
+
+    // Allocate arrays for the recursion (indices 1..maxLag are used)
+    double *phi = malloc(sizeof(double) * (maxLag + 1));
+    double *prev_phi = malloc(sizeof(double) * (maxLag + 1));
+    if (!phi || !prev_phi) {
+        fprintf(stderr, "Memory allocation error in computePACF.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    pacf[0] = 1.0;  // By definition
+    // For m = 1:
+    phi[1] = acf[1] / acf[0];
+    pacf[1] = phi[1];
+    double E = acf[0] * (1 - phi[1] * phi[1]);
+    prev_phi[1] = phi[1];
+
+    // For m = 2, 3, ..., maxLag:
+    for (int m = 2; m <= maxLag; m++) {
+        double sum = 0.0;
+        for (int k = 1; k < m; k++) {
+            sum += prev_phi[k] * acf[m - k];
+        }
+        phi[m] = (acf[m] - sum) / E;
+        pacf[m] = phi[m];
+        // Update the intermediate AR coefficients for lags 1,..., m-1:
+        for (int k = 1; k < m; k++) {
+            phi[k] = prev_phi[k] - phi[m] * prev_phi[m - k];
+        }
+        E = E * (1 - phi[m] * phi[m]);
+        for (int k = 1; k <= m; k++) {
+            prev_phi[k] = phi[k];
+        }
+    }
+    free(acf);
+    free(phi);
+    free(prev_phi);
+}
+
+/**
+ * @brief Automatically selects AR (p) and MA (q) orders based on the sample PACF and ACF.
+ *
+ * This function computes the sample ACF and PACF up to a specified maximum lag and
+ * then uses a simple significance threshold (±1.96/√n) to decide which lags are significant.
+ * The AR order is set to the highest lag where the PACF is significant and the MA order is
+ * set to the highest lag where the ACF is significant.
+ *
+ * @param series The input time series.
+ * @param length The number of observations.
+ * @param maxLag The maximum lag to consider (e.g., 20).
+ * @param selectedAR Output pointer for the selected AR order.
+ * @param selectedMA Output pointer for the selected MA order.
+ */
+void selectARMAOrders(const double series[], int length, int maxLag, int *selectedAR, int *selectedMA) {
+    double *acf = malloc(sizeof(double) * (maxLag + 1));
+    double *pacf = malloc(sizeof(double) * (maxLag + 1));
+    if (!acf || !pacf) {
+        fprintf(stderr, "Memory allocation error in selectARMAOrders.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    computeACF(series, length, maxLag, acf);
+    computePACF(series, length, maxLag, pacf);
+
+    double threshold = 1.96 / sqrt((double)length);
+    int p = 0, q = 0;
+    // Check lags 1 to maxLag (lag 0 is trivial)
+    for (int lag = 1; lag <= maxLag; lag++) {
+        if (fabs(pacf[lag]) > threshold) {
+            p = lag;  // Update AR order to the highest significant lag in PACF
+        }
+        if (fabs(acf[lag]) > threshold) {
+            q = lag;  // Update MA order to the highest significant lag in ACF
+        }
+    }
+    *selectedAR = p;
+    *selectedMA = q;
+    free(acf);
+    free(pacf);
+}
+
+/**
+ * @brief Uses ACF/PACF to get initial ARMA orders and then validates them using the EAFMatrix.
+ *
+ * This function first calls selectARMAOrders to get initial candidate orders.
+ * Then, it fits a simple AR model (assuming d = 0 for simplicity) to compute in‐sample residuals.
+ * It computes the EAFMatrix on the residuals and examines the off‐diagonal elements.
+ * If these diagnostics suggest that there is remaining structure (i.e. average absolute off-diagonals
+ * exceed a threshold), the AR order is increased (you could similarly adjust the MA order).
+ *
+ * @param series     The input time series.
+ * @param length     The number of observations.
+ * @param maxLag     The maximum lag to consider for ACF/PACF.
+ * @param finalAR    Output pointer for the final selected AR order.
+ * @param finalMA    Output pointer for the final selected MA order.
+ */
+void selectOrdersWithFeedback(const double series[], int length, int maxLag, int *finalAR, int *finalMA) {
+    // Step 1: Get initial candidate orders using ACF/PACF.
+    int candidateAR = 0, candidateMA = 0;
+    selectARMAOrders(series, length, maxLag, &candidateAR, &candidateMA);
+
+    // We'll use a simple feedback loop to adjust the AR order if needed.
+    // (For simplicity, we assume d = 0 in this demonstration.)
+    int iterations = 0;
+    int maxIterations = 5;
+    // Set a threshold for the average absolute off-diagonal element in the EAFMatrix.
+    // This threshold can be adjusted (e.g., 0.1, 0.15, etc.)
+    double eafThreshold = 0.1;
+    int adjust = 1;
+    
+    while (adjust && iterations < maxIterations) {
+        // Step 2: Fit a candidate AR model with candidateAR order and compute residuals.
+        // For t = candidateAR ... length-1, the regression is:
+        //   series[t] = intercept + sum_{j=1}^{candidateAR} phi_j * series[t-j] + error[t]
+        int m = length - candidateAR;
+        double *fitted = malloc(sizeof(double) * m);
+        if (!fitted) {
+            fprintf(stderr, "Memory allocation error in selectOrdersWithFeedback (fitted).\n");
+            exit(EXIT_FAILURE);
+        }
+        if (candidateAR > 0 && m > 0) {
+            // Build design matrix X (m x candidateAR) and response Y (m x 1).
+            double X[m][candidateAR];
+            double Y[m][1];
+            for (int t = candidateAR; t < length; t++) {
+                Y[t - candidateAR][0] = series[t];
+                for (int j = 0; j < candidateAR; j++) {
+                    X[t - candidateAR][j] = series[t - j - 1];
+                }
+            }
+            // Estimate coefficients (returns candidateAR coefficients followed by intercept).
+            double *estimates = performMultivariateLinearRegression(m, candidateAR, X, Y);
+            // Compute fitted values.
+            for (int t = candidateAR; t < length; t++) {
+                double pred = estimates[candidateAR]; // intercept
+                for (int j = 0; j < candidateAR; j++) {
+                    pred += estimates[j] * series[t - j - 1];
+                }
+                fitted[t - candidateAR] = pred;
+            }
+            free(estimates);
+        } else {
+            // If candidateAR is 0, then the fitted value is just the series itself.
+            for (int i = 0; i < m; i++) {
+                fitted[i] = series[i];
+            }
+        }
+        
+        // Step 3: Compute residuals.
+        double *residuals = malloc(sizeof(double) * m);
+        if (!residuals) {
+            fprintf(stderr, "Memory allocation error in selectOrdersWithFeedback (residuals).\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int i = 0; i < m; i++) {
+            residuals[i] = series[candidateAR + i] - fitted[i];
+        }
+        
+        // Step 4: Compute the EAFMatrix on the residuals.
+        // Note: EAFMatrix requires at least 6 observations (since it uses length-3 internally).
+        double eaf[3][3] = {0};
+        if (m >= 6) {
+            computeEAFMatrix(residuals, eaf, m);
+        }
+        
+        // Evaluate the off-diagonal elements from row 1 and row 2.
+        double sum = 0.0;
+        int count = 0;
+        for (int i = 1; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (j != i) {
+                    sum += fabs(eaf[i][j]);
+                    count++;
+                }
+            }
+        }
+        double avgOffDiag = (count > 0) ? (sum / count) : 0.0;
+        
+        // Debug print (if desired):
+        // printf("Iteration %d: candidateAR=%d, avgOffDiag=%.4lf\n", iterations, candidateAR, avgOffDiag);
+        
+        // Step 5: If the average off-diagonal correlation is above the threshold,
+        // increase candidateAR (or candidateMA) as additional structure might be present.
+        if (avgOffDiag > eafThreshold) {
+            candidateAR++;  // Increase AR order
+        } else {
+            adjust = 0;  // No adjustment needed
+        }
+        
+        free(fitted);
+        free(residuals);
+        iterations++;
+    }
+    
+    // Return the final orders.
+    *finalAR = candidateAR;
+    *finalMA = candidateMA; // In this example, we did not adjust MA order.
+}
+
+
+/**
+ * @brief Forecasts future values using a generalized ARIMA(p,d,q) model.
+ *
+ * @param series       The original time series data.
+ * @param seriesLength The number of observations in the series.
+ * @param p            AR order.
+ * @param d            Differencing order.
+ * @param q            MA order.
+ * @return Pointer to a dynamically allocated forecast array (of length FORECAST_HORIZON+1).
+ *
+ * This function first differences the series d times. Then if p>0 it constructs
+ * an AR model by regressing the differenced series on its p lagged values. If q>0,
+ * it uses a generalized adaptive gradient descent to estimate q MA parameters (plus an intercept)
+ * based on the AR residuals. Forecasts are produced recursively assuming future shocks are zero.
+ * Finally, if d>0 the forecast is integrated back to the original scale.
+ */
+double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
+    // ----- Step 1. Difference the series d times -----
+    int currentLength = seriesLength;
+    double *currentSeries = malloc(sizeof(double) * currentLength);
+    if (!currentSeries) {
+        fprintf(stderr, "Memory allocation error in forecastARIMA.\n");
+        exit(EXIT_FAILURE);
+    }
+    memcpy(currentSeries, series, sizeof(double)*currentLength);
+    for (int i = 0; i < d; i++) {
+        double *temp = differenceSeries(currentSeries, currentLength, 1);
+        free(currentSeries);
+        currentSeries = temp;
+        currentLength--; // each differencing reduces length by 1
+    }
+    
+    // ----- Step 2. Estimate AR coefficients (if p > 0) using OLS -----
+    double *arEstimates = NULL; // will be of length (p+1): first p coefficients then intercept
+    int m = currentLength - p;  // number of observations usable for AR regression
+    if (p > 0 && m > 0) {
+        // Build design matrix X (m x p) and response vector Y (m x 1)
+        double X_mat[m][p];
+        double Y_mat[m][1];
+        for (int t = p; t < currentLength; t++) {
+            Y_mat[t - p][0] = currentSeries[t];
+            for (int j = 0; j < p; j++) {
+                X_mat[t - p][j] = currentSeries[t - j - 1];
+            }
+        }
+        arEstimates = performMultivariateLinearRegression(m, p, X_mat, Y_mat);
+        // arEstimates[0..p-1] are AR coefficients; arEstimates[p] is the intercept.
+    }
+    
+    // ----- Step 3. Compute in-sample AR residuals (if MA part is needed) -----
+    double *arResiduals = NULL;
+    if (q > 0 && p > 0 && m > 0) {
+        arResiduals = malloc(sizeof(double) * m);
+        if (!arResiduals) {
+            fprintf(stderr, "Memory allocation error in forecastARIMA (arResiduals).\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int t = p; t < currentLength; t++) {
+            double pred = arEstimates[p]; // intercept
+            for (int j = 0; j < p; j++) {
+                pred += arEstimates[j] * currentSeries[t - j - 1];
+            }
+            arResiduals[t - p] = currentSeries[t] - pred;
+        }
+    }
+    
+    // ----- Step 4. Estimate MA parameters (if q > 0) via adaptive gradient descent -----
+    // The MA model is: residual[t] ≈ (MA intercept) + sum_{j=1}^{q} theta_j * residual[t - j]
+    // We use the in-sample residuals for t = q ... (m-1) to estimate a (q+1)-dimensional parameter vector.
+    double *maEstimates = NULL; // length q+1: [theta_1, theta_2, ..., theta_q, MA intercept]
+    if (q > 0 && m > q) {
+        int n_ma = m - q;  // number of observations for MA regression
+        // Build design matrix for MA estimation: MA_X[i][j] = arResiduals[i + q - j - 1] for i=0,...,n_ma-1, j=0,...,q-1.
+        double **MA_X = malloc(n_ma * sizeof(double *));
+        double *MA_Y = malloc(n_ma * sizeof(double));
+        if (!MA_X || !MA_Y) {
+            fprintf(stderr, "Memory allocation error in forecastARIMA (MA estimation).\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int i = 0; i < n_ma; i++) {
+            MA_X[i] = malloc(q * sizeof(double));
+            if (!MA_X[i]) {
+                fprintf(stderr, "Memory allocation error in forecastARIMA (MA_X[%d]).\n", i);
+                exit(EXIT_FAILURE);
+            }
+        }
+        for (int i = 0; i < n_ma; i++) {
+            MA_Y[i] = arResiduals[i + q];  // target residual
+            for (int j = 0; j < q; j++) {
+                MA_X[i][j] = arResiduals[i + q - j - 1]; // predictor: past residuals
+            }
+        }
+        // Now estimate parameters using adaptive gradient descent.
+        maEstimates = malloc(sizeof(double) * (q + 1));
+        if (!maEstimates) {
+            fprintf(stderr, "Memory allocation error in forecastARIMA (maEstimates).\n");
+            exit(EXIT_FAILURE);
+        }
+        // Initialize parameters to 0.
+        for (int j = 0; j < q + 1; j++) {
+            maEstimates[j] = 0.0;
+        }
+        double learningRate = INITIAL_MA_LEARNING_RATE;
+        int iter = 0;
+        double currentObjective = 0.0, newObjective = 0.0;
+        // Compute initial objective: sum_{i=0}^{n_ma-1} [MA_Y[i] - (maInter + sum_{j=0}^{q-1} theta_j * MA_X[i][j])]^2.
+        for (int i = 0; i < n_ma; i++) {
+            double pred = maEstimates[q]; // intercept is last element
+            for (int j = 0; j < q; j++) {
+                pred += maEstimates[j] * MA_X[i][j];
+            }
+            double err = MA_Y[i] - pred;
+            currentObjective += err * err;
+        }
+        while (iter < MAX_ITERATIONS) {
+            double *grad = malloc(sizeof(double) * (q + 1));
+            if (!grad) {
+                fprintf(stderr, "Memory allocation error in forecastARIMA (grad).\n");
+                exit(EXIT_FAILURE);
+            }
+            for (int j = 0; j < q + 1; j++) {
+                grad[j] = 0.0;
+            }
+            // Compute gradient.
+            for (int i = 0; i < n_ma; i++) {
+                double pred = maEstimates[q];
+                for (int j = 0; j < q; j++) {
+                    pred += maEstimates[j] * MA_X[i][j];
+                }
+                double err = MA_Y[i] - pred;
+                for (int j = 0; j < q; j++) {
+                    grad[j] += -2.0 * err * MA_X[i][j];
+                }
+                grad[q] += -2.0 * err;
+            }
+            // Compute norm of gradient.
+            double gradNorm = 0.0;
+            for (int j = 0; j < q + 1; j++) {
+                gradNorm += grad[j] * grad[j];
+            }
+            gradNorm = sqrt(gradNorm);
+            if (gradNorm < CONVERGENCE_TOLERANCE) {
+                free(grad);
+                break;
+            }
+            double *proposed = malloc(sizeof(double) * (q + 1));
+            if (!proposed) {
+                fprintf(stderr, "Memory allocation error in forecastARIMA (proposed).\n");
+                exit(EXIT_FAILURE);
+            }
+            for (int j = 0; j < q + 1; j++) {
+                proposed[j] = maEstimates[j] - learningRate * grad[j];
+            }
+            newObjective = 0.0;
+            for (int i = 0; i < n_ma; i++) {
+                double pred = proposed[q];
+                for (int j = 0; j < q; j++) {
+                    pred += proposed[j] * MA_X[i][j];
+                }
+                double err = MA_Y[i] - pred;
+                newObjective += err * err;
+            }
+            if (newObjective < currentObjective) {
+                for (int j = 0; j < q + 1; j++) {
+                    maEstimates[j] = proposed[j];
+                }
+                currentObjective = newObjective;
+                learningRate *= 1.1;
+            } else {
+                learningRate *= 0.5;
+                if (learningRate < MIN_MA_LEARNING_RATE) {
+                    free(proposed);
+                    free(grad);
+                    break;
+                }
+            }
+            free(proposed);
+            free(grad);
+            iter++;
+        }
+        // Free MA design memory.
+        for (int i = 0; i < n_ma; i++) {
+            free(MA_X[i]);
+        }
+        free(MA_X);
+        free(MA_Y);
+    }
+    
+    // ----- Step 5. Produce forecasts on the differenced scale using the AR part -----
+    // For ARMA forecasting the standard assumption is that future shocks (and hence the MA terms) have zero mean.
+    // Thus the forecast becomes essentially the AR part plus (if estimated) the MA intercept.
+    double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
+    if (!forecast) {
+        fprintf(stderr, "Memory allocation error in forecastARIMA (forecast).\n");
+        exit(EXIT_FAILURE);
+    }
+    // One-step ahead forecast: use last p observations.
+    double oneStep = 0.0;
+    if (p > 0) {
+        oneStep = arEstimates ? arEstimates[p] : 0.0;
+        for (int j = 0; j < p; j++) {
+            oneStep += arEstimates[j] * currentSeries[currentLength - j - 1];
+        }
+    } else {
+        oneStep = currentSeries[currentLength - 1];
+    }
+    if (q > 0) {
+        oneStep += maEstimates[q]; // add estimated MA intercept if available
+    }
+    forecast[0] = oneStep;
+    
+    // Recursive forecast for h = 2 to FORECAST_HORIZON:
+    // We use a simple recursion with the AR part; future MA terms vanish.
+    for (int h = 1; h < FORECAST_HORIZON; h++) {
+        double f = 0.0;
+        if (p > 0) {
+            f = arEstimates ? arEstimates[p] : 0.0; // AR intercept
+            // For lags: if forecast value exists use it; otherwise use the last available observation.
+            for (int j = 0; j < p; j++) {
+                double value;
+                if (h - j - 1 >= 0) {
+                    value = forecast[h - j - 1];
+                } else {
+                    value = currentSeries[currentLength + h - j - 1];
+                }
+                f += arEstimates[j] * value;
+            }
+        } else {
+            f = currentSeries[currentLength - 1];
+        }
+        if (q > 0) {
+            f += maEstimates[q];
+        }
+        forecast[h] = f;
+    }
+    // Optionally store a placeholder (e.g. forecast variance) at forecast[FORECAST_HORIZON].
+    forecast[FORECAST_HORIZON] = 0.0;
+    
+    // ----- Step 6. If differencing was applied, integrate the forecast back to original scale -----
+    if (d > 0) {
+        // For simplicity we assume that the last observed value of the original series is used as recovery.
+        double recoveryValue = series[seriesLength - 1];
+        double *integrated = integrateSeries(forecast, recoveryValue, FORECAST_HORIZON);
+        for (int i = 0; i < FORECAST_HORIZON; i++) {
+            forecast[i] = integrated[i];
+        }
+        free(integrated);
+    }
+    
+    // ----- Cleanup -----
+    free(currentSeries);
+    if (arEstimates) free(arEstimates);
+    if (maEstimates) free(maEstimates);
+    if (arResiduals) free(arResiduals);
+    
+    return forecast;
+}
+
 /*========================================================================
   Main Function (for testing purposes)
 ========================================================================*/
@@ -2169,19 +2218,21 @@ int main(void)
   double sampleData[] = {10.544653, 10.688583, 10.666841, 10.662732, 10.535033, 10.612065, 10.577628, 10.524487, 10.511290, 10.520899, 10.605484, 10.506456, 10.693456, 10.667562, 10.640863, 10.553473, 10.684760, 10.752397, 10.671068, 10.667091, 10.641893, 10.625706, 10.701795, 10.607544, 10.689169, 10.695256, 10.717050, 10.677475, 10.691141, 10.730298, 10.732664, 10.710082, 10.713123, 10.759815, 10.696599, 10.663845, 10.716597, 10.780855, 10.795759, 10.802620, 10.720496, 10.753401, 10.709436, 10.746909, 10.737377, 10.754609, 10.765248, 10.692602, 10.837926, 10.755324, 10.756213, 10.843190, 10.862529, 10.751269, 10.902390, 10.817731, 10.859796, 10.887362, 10.835401, 10.824412, 10.860767, 10.819504, 10.907496, 10.831528, 10.821727, 10.830010, 10.915317, 10.858694, 10.921139, 10.927524, 10.894352, 10.889785, 10.956356, 10.938758, 11.093567, 10.844841, 11.094493, 11.035941, 10.982765, 11.071057, 10.996308, 11.099276, 11.142057, 11.137176, 11.157537, 11.007247, 11.144075, 11.183029, 11.172096, 11.164571, 11.192833, 11.227109, 11.141589, 11.311490, 11.239783, 11.295933, 11.199566, 11.232262, 11.333208, 11.337874, 11.322334, 11.288216, 11.280459, 11.247973, 11.288277, 11.415095, 11.297583, 11.360763, 11.288338, 11.434631, 11.456051, 11.578981, 11.419166, 11.478404, 11.660141, 11.544303, 11.652028, 11.638368, 11.651792, 11.621518, 11.763853, 11.760687, 11.771138, 11.678104, 11.783163, 11.932094, 11.948678, 11.962627, 11.937934, 12.077570, 11.981595, 12.096366, 12.032683, 12.094221, 11.979764, 12.217793, 12.235930, 12.129859, 12.411867, 12.396301, 12.413920, 12.445867, 12.480462, 12.470674, 12.537774, 12.562252, 12.810248, 12.733546, 12.861890, 12.918012, 13.033087, 13.245610, 13.184196, 13.414342, 13.611838, 13.626345, 13.715446, 13.851129, 14.113374, 14.588537, 14.653982, 15.250756, 15.618371, 16.459558, 18.144264, 23.523062, 40.229511, 38.351265, 38.085281, 37.500885, 37.153946, 36.893066, 36.705956, 36.559536, 35.938847, 36.391586, 36.194046, 36.391586, 36.119102, 35.560543, 35.599018, 34.958851, 35.393860, 34.904797, 35.401318, 34.863518, 34.046680, 34.508522, 34.043182, 34.704235, 33.556644, 33.888481, 33.533638, 33.452129, 32.930935, 32.669731, 32.772537, 32.805634, 32.246761, 32.075809, 31.864927, 31.878294, 32.241131, 31.965626, 31.553604, 30.843288, 30.784569, 31.436094, 31.170496, 30.552132, 30.500242, 30.167421, 29.911989, 29.586046, 29.478958, 29.718994, 29.611095, 29.557945, 28.463432, 29.341291, 28.821512, 28.447210, 27.861872, 27.855633, 27.910660, 28.425800, 27.715517, 27.617193, 27.093372, 26.968832, 26.977205, 27.170172, 26.251677, 26.633236, 26.224941, 25.874708, 25.593761, 26.392395, 24.904768, 25.331600, 24.530737, 25.074808, 25.310865, 24.337013, 24.442986, 24.500193, 24.130409, 24.062714, 24.064592, 23.533037, 23.977909, 22.924667, 22.806379, 23.130791, 22.527645, 22.570505, 22.932512, 22.486126, 22.594856, 22.383926, 22.115181, 22.105082, 21.151754, 21.074114, 21.240192, 20.977468, 20.771507, 21.184586, 20.495111, 20.650751, 20.656075, 20.433039, 20.005697, 20.216360, 19.982117, 19.703951, 19.572884, 19.332155, 19.544645, 18.666328, 19.219872, 18.934229, 19.186989, 18.694986, 18.096903, 18.298306, 17.704309, 18.023785, 18.224157, 18.182484, 17.642824, 17.739542, 17.474176, 17.270575, 17.604120, 17.631210, 16.639175, 17.107626, 17.024216, 16.852285, 16.780111, 16.838861, 16.539309, 16.092861, 16.131529, 16.221350, 16.087164, 15.821659, 15.695448, 15.693087, 16.047991, 15.682863, 15.724131, 15.263708, 15.638486, 15.443835, 15.602257, 15.122874, 14.918172, 14.968882, 14.843689, 14.861169, 15.052527, 15.056897, 14.690192, 14.686479, 14.567565, 14.365212, 14.253309, 14.289158, 14.227124, 14.069589, 14.074703, 13.869432, 13.861959, 13.782178, 13.882711, 13.908362, 13.727641, 13.600214, 13.594969, 13.535290, 13.602018, 13.502626, 13.579159, 13.207825, 13.426789, 13.178141, 13.286413, 12.958746, 13.189507, 13.079733, 13.138372, 12.986096, 12.854589, 12.858962, 12.903029, 12.852099, 12.644394, 12.558786, 12.636994};
 
   int dataLength = sizeof(sampleData) / sizeof(sampleData[0]);
-
-  // Validate input length.
-  assert(dataLength > 3 && "Series length must be greater than 3 for AR estimation.");
-
-  double meanValue = calculateMean(sampleData, dataLength);
-  printf("Mean = %lf\n", meanValue);
-
-  // Univariate regression test.
-  double predictor[] = {1, 2, 3, 4, 5};
-  double response[] = {2, 4, 6, 8, 10};
-  double *lr1Estimates = performUnivariateLinearRegression(predictor, response, 5);
-  printf("Univariate Regression: Slope = %lf, Intercept = %lf\n", lr1Estimates[0], lr1Estimates[1]);
-  free(lr1Estimates);
+  
+  
+  // --- Step 1: Use selectOrdersWithFeedback to determine candidate AR and MA orders ---
+  int finalAR, finalMA;
+  int maxLag = 4;  // You can adjust this maximum lag
+  selectOrdersWithFeedback(sampleData, dataLength, maxLag, &finalAR, &finalMA);
+  printf("Selected orders (via feedback): AR = %d, MA = %d\n", finalAR, finalMA);
+  
+  // --- (Optional) Step 1b: Perform an ADF test on the series ---
+  // Uncomment the lines below if you want to run the ADF test.
+  /*
+  double tStat, pValue;
+  int isStationary = ADFTestExtendedAutoLag(sampleData, dataLength, MODEL_CONSTANT_ONLY, &tStat, &pValue);
+  printf("ADF test: tStat = %lf, pValue = %lf, Stationary = %d\n", tStat, pValue, isStationary);
+  */
 
   // Forecast using AR(1)
   double *ar1Forecast = forecastAR1(sampleData, 183);
@@ -2193,28 +2244,17 @@ int main(void)
   printf("\n");
   free(ar1Forecast);
 
-  /* --- Compute AR(1) residuals and run Ljung–Box test --- */
-  int newLength = dataLength - 1;
-  double predictions[newLength];
-  double *regEst = performUnivariateLinearRegression(sampleData, sampleData + 1, newLength);
-  double phi = regEst[0];
-  double intercept = regEst[1];
-  predictUnivariate(sampleData, predictions, phi, intercept, newLength);
-  double residuals[newLength];
-  calculateArrayDifference(sampleData + 1, predictions, residuals, newLength);
-  free(regEst);
-  // For AR(1), one parameter is estimated; test using 10 lags.
-  checkResidualDiagnostics(residuals, newLength, 10, 1);
 
-  // Forecast using AR(1)-MA(2) hybrid model.
-  double *ar1ma2Forecast = forecastAR1MA1(sampleData, 183);
-  printf("AR(1)-MA(1) Forecast: ");
-  for (int i = 0; i < 17; i++)
-  {
-    printf("%lf ", ar1ma2Forecast[i]);
-  }
-  printf("\n");
-  free(ar1ma2Forecast);
+    // Forecast using the generalized ARIMA function with AR(1)-MA(1)
+    // (Here we set p = 1, d = 0, and q = 1.)
+    double *armaForecast = forecastARIMA(sampleData, dataLength, 1, 0, 1);
+    printf("Generalized ARIMA (AR(1)-MA(1)) Forecast:\n");
+    for (int i = 0; i < FORECAST_HORIZON; i++) {
+        printf("%lf ", armaForecast[i]);
+    }
+    printf("\n");
+
+    free(armaForecast);
 
   // Additional forecasting models (e.g., AR(2)-MA(1), AR(2)-MA(2)) can be tested here.
 
