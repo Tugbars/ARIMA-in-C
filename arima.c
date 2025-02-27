@@ -1,143 +1,3 @@
-/**
- * @defgroup LinearRegressionFunctions Linear Regression Functions
- * @brief Functions used to estimate model parameters via least‐squares.
- *
- * These functions provide implementations for several regression routines:
- *
- * - **Univariate Linear Regression (LR1):**
- *   - **LR1(double arr_x[], double arr_y[], int length):**
- *     Computes the slope (β) and intercept from regressing y on x. It first centers the data
- *     (by subtracting the means), computes the standard deviations, and then calculates the Pearson
- *     correlation coefficient. The slope is computed using the relationship:
- *     \f[
- *         \beta = \mathrm{Corr} \times \frac{S_y}{S_x}
- *     \f]
- *     and the intercept as:
- *     \f[
- *         \mathrm{intercept} = \bar{y} - \beta\, \bar{x}
- *     \f]
- *   - **LR1_Pred(...):**
- *     Given the estimated slope and intercept, this function produces the predicted values for a
- *     provided predictor array.
- *
- * - **Bivariate Linear Regression (LR2):**
- *   - **LR2(double arr_x1[], double arr_x2[], double arr_y[], int length):**
- *     Computes regression estimates when two predictors are available. The function calculates sums,
- *     products, and uses closed‐form formulas (based on covariances) to obtain β₁, β₂, and the intercept.
- *   - **LR2_Pred(...):**
- *     Produces predictions given two predictor arrays and their corresponding estimated coefficients.
- *
- * - **Multivariate Regression (LRM):**
- *   - **LRM(int m, int n, double X[][n], double Y[][1]):**
- *     For a model with n predictors and m observations, this function first normalizes the design
- *     matrix (by subtracting column means). It then forms the normal equations (XᵀX) and solves for
- *     the coefficients using matrix inversion (selecting an appropriate routine for a 3×3 or 4×4 matrix).
- *     The intercept is computed separately using the means of X and Y.
- *   - **LRM_Pred(...):**
- *     Uses the estimated coefficients from LRM to compute predicted values for a given matrix of predictors.
- *
- * - **Correlation Function (Corr):**
- *   - **Corr(double arr_x[], double arr_y[], int length):**
- *     Computes the Pearson correlation coefficient between two arrays.
- *
- * @note Detailed parameter and return-value descriptions for each function are provided
- * in the corresponding function documentation.
- *
- * @{
- */
-
-/* (Place the function documentation for LR1, LR1_Pred, LR2, LR2_Pred, LRM, LRM_Pred, and Corr here.) */
-
-/** @} */ // end of LinearRegressionFunctions group
-
-/**
- * @defgroup StationarityTesting Stationarity Testing and Data Preprocessing
- * @brief Functions for differencing a time series to achieve stationarity and for drift adjustment.
- *
- * Before applying a forecasting model it is common practice to difference the series if it is non‐stationary.
- *
- * - **DFTest (Dickey–Fuller Test):**
- *   - **DFTest(double arr[], double arr_recov[], int length):**
- *     This function iteratively applies a regression test to determine the order of differencing (d)
- *     required to achieve stationarity. In each iteration, the function:
- *       - Creates a “lagged” version and a “lead” version (one time step ahead) of the series.
- *       - Uses LR1 to regress the lead on the lagged series.
- *       - Checks whether the estimated coefficient is sufficiently close to unity (within a tolerance
- *         of approximately ±1.001). If not, the series is differenced (by subtracting the previous value)
- *         and the test is repeated.
- *     The function returns the order of differencing applied (d) and stores recovery information in
- *     the array `arr_recov` so that the drift can be added back later.
- *
- * - **Drift Adjustment:**
- *   - **Drift(double arr[], double arr_stry[], int length, int d):**
- *     After differencing, if d > 0, this function adjusts the series to “recover” its original level.
- *     Forecasts generated on the differenced scale need to be cumulatively summed (or otherwise adjusted)
- *     using the saved drift information.
- *
- * @note Detailed descriptions for parameters and processing steps are available in the function documentation.
- *
- * @{
- */
-
-/* (Place the function documentation for DFTest and Drift here.) */
-
-/** @} */ // end of StationarityTesting group
-
-/**
- * @defgroup DiagnosticMatrix Autocorrelation/Diagnostic Matrix (EAFMatrix)
- * @brief Functions for computing diagnostic matrices based on extended autocorrelations.
- *
- * The diagnostic matrix is used for model selection. In particular:
- *
- * - **EAFMatrix(double arr[], double arr_eaf[][3], int length):**
- *   This function computes an extended autocorrelation function matrix as follows:
- *     - It first computes correlations between the series and its various leads/lags (typically for lags 1, 2, and 3).
- *     - Then, it fits an AR(1) model (using LR1) and computes the prediction errors.
- *     - The autocorrelations of these error series are computed.
- *     - The process is repeated for an AR(2) model.
- *   The resulting 3×3 matrix (`arr_eaf`) encapsulates diagnostic information about the series and is used
- *   later in selecting the most appropriate forecasting model.
- *
- * @note More detailed parameter explanations are provided in the function’s documentation.
- *
- * @{
- */
-
-/* (Place the function documentation for EAFMatrix here.) */
-
-/** @} */ // end of DiagnosticMatrix group
-
-/**
- * @defgroup ErrorMetrics Error Metrics
- * @brief Functions to compute forecast error metrics.
- *
- * Two primary error metrics are computed:
- *
- * - **MAPE (Mean Absolute Percentage Error):**
- *   - **MAPE(double arr_y[], double arr_y_cap[], int length):**
- *     Computes the average absolute percentage difference between forecasted values and actual values.
- *
- * - **MAE (Mean Absolute Error):**
- *   - **MAE(double arr_y[], double arr_y_cap[], int length):**
- *     Computes the average absolute error between forecasted values and actual values.
- *
- * These metrics help in assessing the quality of forecasts produced by various models.
- *
- * @note Refer to each function’s detailed documentation for parameter and return descriptions.
- *
- * @{
- */
-
-/* (Place the function documentation for MAPE and MAE here.) */
-
-/** @} */ // end of ErrorMetrics group
-
-/**
- * @file forecasting.c
- * @brief Refactored time series forecasting code with modular design,
- *        improved error handling, and detailed inline documentation.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -394,76 +254,6 @@ void calculateLeadWithLag(const double array[], double leadArray[], int length, 
   for (int i = 0; i < (length - lead - lag); i++)
   {
     leadArray[i] = array[i + lag];
-  }
-}
-
-/**
- * @brief Converts a 1D array into a 2D matrix with one column.
- *
- * @param numElements The number of elements.
- * @param array The input array.
- * @param matrix Output 2D matrix (numElements x 1).
- */
-void arrayToMatrix(int numElements, const double array[], double matrix[][1])
-{
-  for (int i = 0; i < numElements; i++)
-  {
-    matrix[i][0] = array[i];
-  }
-}
-
-/**
- * @brief Converts a 2D matrix (with one column) to a 1D array.
- *
- * @param numRows The number of rows.
- * @param matrix Input 2D matrix.
- * @param array Output array.
- */
-void matrixToArray(int numRows, double matrix[][1], double array[])
-{
-  for (int i = 0; i < numRows; i++)
-  {
-    array[i] = matrix[i][0];
-  }
-}
-
-/**
- * @brief Column-binds three arrays into a 2D matrix.
- *
- * @param numRows The number of rows.
- * @param array1 First array (becomes column 0).
- * @param array2 Second array (becomes column 1).
- * @param array3 Third array (becomes column 2).
- * @param result Output 2D matrix with 3 columns.
- */
-void columnBind3(int numRows, double array1[], double array2[], double array3[], double result[][3])
-{
-  for (int i = 0; i < numRows; i++)
-  {
-    result[i][0] = array1[i];
-    result[i][1] = array2[i];
-    result[i][2] = array3[i];
-  }
-}
-
-/**
- * @brief Column-binds four arrays into a 2D matrix.
- *
- * @param numRows The number of rows.
- * @param array1 First array.
- * @param array2 Second array.
- * @param array3 Third array.
- * @param array4 Fourth array.
- * @param result Output 2D matrix with 4 columns.
- */
-void columnBind4(int numRows, double array1[], double array2[], double array3[], double array4[], double result[][4])
-{
-  for (int i = 0; i < numRows; i++)
-  {
-    result[i][0] = array1[i];
-    result[i][1] = array2[i];
-    result[i][2] = array3[i];
-    result[i][3] = array4[i];
   }
 }
 
@@ -1176,10 +966,26 @@ double *performMultivariateLinearRegression(int numObservations, int numPredicto
             }
         }
         free(invTemp);
+    } else if (n == 5) {
+        // For 5x5 matrix, use our general QR inversion routine.
+        double tempMatrix[n*n];
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                tempMatrix[IDX(i,j,n)] = XtX[i][j]; // convert to column-major
+            }
+        }
+        double *invTemp = invertMatrixQR(tempMatrix, n);
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                XtX_inv[i][j] = invTemp[IDX(i,j,n)];
+            }
+        }
+        free(invTemp);
     } else {
         fprintf(stderr, "Error: QR inversion for n=%d not implemented.\n", n);
         exit(EXIT_FAILURE);
     }
+
 
     // Compute XtX_inv_Xt = XtX_inv * Xt.
     matrixMultiply(numPredictors, numPredictors, numObservations, XtX_inv, Xt, XtX_inv_Xt);
@@ -2425,7 +2231,7 @@ int main(void)
 
     // Forecast using the generalized ARIMA function with AR(1)-MA(1)
     // (Here we set p = 1, d = 0, and q = 1.)
-    double *armaForecast = forecastARIMA(sampleData, 183, 2, 0, 4);
+    double *armaForecast = forecastARIMA(sampleData, 181, 2, 0, 4);
     printf("Generalized ARIMA (AR(1)-MA(1)) Forecast:\n");
     for (int i = 0; i < FORECAST_HORIZON; i++) {
         printf("%lf ", armaForecast[i]);
