@@ -115,8 +115,4 @@ This implementation of ARIMA forecasting in C takes a modular approach that spli
 
 ---
 
-### **Final Notes**
-- With `\color{white}`, all equations will **always appear clearly on a dark background**.
-- These equations will **still display properly on a light background** since the rendering is done in **SVG format**, which supports transparent backgrounds.
 
-Now, your GitHub **README.md** will have proper mathematical rendering that remains visible in both light and dark themes! 🚀
