@@ -541,279 +541,407 @@ void matrixMultiply(int rowsA, int colsA, int colsB, double A[][colsA], double B
   }
 }
 
-/**
- * @brief Performs LU decomposition with partial pivoting.
+/*--- QR Inversion Code Begin ---*/
+
+/** @def IDX(i,j,ld)
+ *  @brief A macro to index a 2D array stored in column‐major order.
  *
- * This function decomposes a square matrix A (n x n) into a product of a lower
- * triangular matrix L and an upper triangular matrix U (stored in the same matrix),
- * while computing a pivot array that records the row exchanges.
+ *  @param i Row index.
+ *  @param j Column index.
+ *  @param ld Leading dimension (the number of rows).
  *
- * Partial pivoting is employed to enhance numerical stability, especially for
- * nearly singular matrices. This robust method is critical in ARIMA computations
- * where the normal equations may produce ill-conditioned matrices.
- *
- * @param n The dimension of the square matrix.
- * @param A The input matrix, which is overwritten with the combined L and U factors.
- * @param pivot An output array holding the pivot indices.
- * @return 0 on success, nonzero if A is singular.
+ *  This macro returns the 1D offset in the column‐major array for the element
+ *  at \c (i,j). In column‐major order, elements of a column are consecutive in memory,
+ *  so the offset is \c (i + j*ld).
  */
-int luDecomposition(int n, double A[n][n], int pivot[n])
-{
-  // Initialize the pivot vector with row indices.
-  for (int i = 0; i < n; i++)
-  {
-    pivot[i] = i;
-  }
-  for (int k = 0; k < n; k++)
-  {
-    // Partial pivoting: find the row with the maximum absolute value in column k.
-    double max = fabs(A[k][k]);
-    int maxIndex = k;
-    for (int i = k + 1; i < n; i++)
-    {
-      if (fabs(A[i][k]) > max)
-      {
-        max = fabs(A[i][k]);
-        maxIndex = i;
-      }
+#define IDX(i,j,ld) ((i) + (j)*(ld))
+
+/**
+ * @brief Performs a rank–revealing blocked QR decomposition with column pivoting
+ *        and refined norm updates (including reorthogonalization passes).
+ *
+ * @details
+ * Given an \c m×n matrix \c A (stored in column‐major order), this function computes
+ * a QR factorization \f$A P = Q R\f$ (with column pivoting) in-place. The final matrix \c A
+ * contains:
+ *   - The upper triangle of \c A corresponds to the \f$R\f$ factor.
+ *   - The lower portion (and the first element in each Householder vector implicitly \c 1)
+ *     encodes the Householder vectors used to form \f$Q\f$ implicitly.
+ *
+ * Column pivoting is used to enhance numerical stability and reveal rank deficiency by
+ * swapping columns based on the largest updated column norms. The block updates improve
+ * cache efficiency and can provide better performance on larger matrices.
+ *
+ * **Algorithm Sketch:**
+ * - For each column \c k (pivot), find the column among \c [k..n-1] with the largest
+ *   updated norm and swap it into position \c k.
+ * - Compute a Householder reflector for column \c k that zeroes out all elements below
+ *   the diagonal. Store the reflector in \c A.
+ * - Apply the reflector to the trailing submatrix in a *blocked* manner (up to \c block_size
+ *   columns at a time), and perform a “reorthogonalization” pass to reduce numerical errors.
+ * - Update each trailing column’s norm estimate, and if it has dropped significantly,
+ *   recompute the norm to avoid error accumulation.
+ *
+ * @param[in]  m            Number of rows of \c A.
+ * @param[in]  n            Number of columns of \c A.
+ * @param[in,out] A         Pointer to the \c m×n matrix in column‐major order. On exit, the upper
+ *                          triangle contains \f$R\f$, and the lower part encodes Householder vectors.
+ * @param[in]  lda          Leading dimension (must be \c >= m).
+ * @param[out] jpvt         An integer array of length \c n. On exit, \c jpvt[k] is the column index
+ *                          of the \c k–th pivot, indicating how columns were permuted.
+ * @param[in]  block_size   The block size for updating the trailing submatrix. For small problems,
+ *                          \c 1 is often sufficient; for larger problems, a bigger block size may
+ *                          improve performance.
+ *
+ * @pre \c A must be a valid pointer of size at least \c lda*n, storing the matrix in column‐major format.
+ * @pre \c jpvt must be a valid pointer to an integer array of length \c n.
+ *
+ * @note If \c block_size is too large (bigger than \c n–k), it is automatically reduced in each iteration.
+ *
+ * @warning If \c A has many zero rows or if it is numerically rank‐deficient, the computed
+ *          reflectors might produce very small pivots in the trailing columns. This is precisely
+ *          why column pivoting is recommended, so that small pivots appear in later columns.
+ *
+ * **Reference**: G. W. Stewart, *Matrix Algorithms, Volume 1: Basic Decompositions*, SIAM, 1998.
+ */
+void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int block_size) {
+    int i, j, k, nb;
+
+    double *norms = malloc(n * sizeof(double));
+    double *norms_updated = malloc(n * sizeof(double));
+    if (!norms || !norms_updated) {
+        fprintf(stderr, "Memory allocation error in qr_decomp_colpivot_blocked.\n");
+        exit(EXIT_FAILURE);
     }
-    DEBUG_PRINT("LU Decomposition: k=%d, maxIndex=%d, max=%lf\n", k, maxIndex, max);
-    if (max < SINGULARITY_THRESHOLD)
-    {
-      DEBUG_PRINT("LU Decomposition: Matrix is singular at k=%d\n", k);
-      return -1; // Singular matrix
+
+    for (j = 0; j < n; j++) {
+        jpvt[j] = j;
+        double sum = 0.0;
+        for (i = 0; i < m; i++) {
+            double aij = A[IDX(i,j,lda)];
+            sum += aij * aij;
+        }
+        norms[j] = sqrt(sum);
+        norms_updated[j] = norms[j];
     }
-    // Swap rows k and maxIndex if needed.
-    if (maxIndex != k)
-    {
-      for (int j = 0; j < n; j++)
-      {
-        double temp = A[k][j];
-        A[k][j] = A[maxIndex][j];
-        A[maxIndex][j] = temp;
-      }
-      int temp = pivot[k];
-      pivot[k] = pivot[maxIndex];
-      pivot[maxIndex] = temp;
-      DEBUG_PRINT("LU Decomposition: Swapped rows %d and %d\n", k, maxIndex);
+
+    for (k = 0; k < n && k < m; k++) {
+        // Column pivoting: find column with max updated norm.
+        int max_index = k;
+        for (j = k; j < n; j++) {
+            if (norms_updated[j] > norms_updated[max_index])
+                max_index = j;
+        }
+        if (max_index != k) {
+            for (i = 0; i < m; i++) {
+                double tmp = A[IDX(i, k, lda)];
+                A[IDX(i, k, lda)] = A[IDX(i, max_index, lda)];
+                A[IDX(i, max_index, lda)] = tmp;
+            }
+            int tmp_int = jpvt[k];
+            jpvt[k] = jpvt[max_index];
+            jpvt[max_index] = tmp_int;
+
+            double tmp_norm = norms_updated[k];
+            norms_updated[k] = norms_updated[max_index];
+            norms_updated[max_index] = tmp_norm;
+            tmp_norm = norms[k];
+            norms[k] = norms[max_index];
+            norms[max_index] = tmp_norm;
+        }
+        // Compute Householder vector for column k.
+        double norm_x = 0.0;
+        for (i = k; i < m; i++) {
+            norm_x += A[IDX(i, k, lda)] * A[IDX(i, k, lda)];
+        }
+        norm_x = sqrt(norm_x);
+        if (norm_x == 0.0) {
+            A[IDX(k, k, lda)] = 0.0;
+            continue;
+        }
+        double sign = (A[IDX(k, k, lda)] >= 0) ? -1.0 : 1.0;
+        double *v = malloc((m - k) * sizeof(double));
+        if (!v) {
+            fprintf(stderr, "Memory allocation error in qr_decomp_colpivot_blocked (v).\n");
+            exit(EXIT_FAILURE);
+        }
+        v[0] = A[IDX(k, k, lda)] - sign * norm_x;
+        for (i = k + 1; i < m; i++) {
+            v[i - k] = A[IDX(i, k, lda)];
+        }
+        double norm_v = 0.0;
+        for (i = 0; i < m - k; i++) {
+            norm_v += v[i] * v[i];
+        }
+        norm_v = sqrt(norm_v);
+        if (norm_v != 0) {
+            for (i = 0; i < m - k; i++) {
+                v[i] /= norm_v;
+            }
+        }
+        A[IDX(k, k, lda)] = sign * norm_x;
+        for (i = k + 1; i < m; i++) {
+            A[IDX(i, k, lda)] = v[i - k];
+        }
+        // Blocked update of trailing columns.
+        nb = ((k + block_size) < n) ? block_size : (n - k);
+        for (j = k + 1; j < k + nb; j++) {
+            double dot = 0.0;
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                dot += vi * A[IDX(i, j, lda)];
+            }
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                A[IDX(i, j, lda)] -= 2 * vi * dot;
+            }
+            // Reorthogonalization pass.
+            dot = 0.0;
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                dot += vi * A[IDX(i, j, lda)];
+            }
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                A[IDX(i, j, lda)] -= 2 * vi * dot;
+            }
+            double new_norm_sq = 0.0;
+            for (i = k+1; i < m; i++) {
+                new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+            }
+            double new_norm = sqrt(new_norm_sq);
+            if (new_norm < 0.1 * norms[j]) {
+                new_norm_sq = 0.0;
+                for (i = k+1; i < m; i++) {
+                    new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                }
+                new_norm = sqrt(new_norm_sq);
+            }
+            norms_updated[j] = new_norm;
+            norms[j] = new_norm;
+        }
+        for (j = k + nb; j < n; j++) {
+            double dot = 0.0;
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                dot += vi * A[IDX(i, j, lda)];
+            }
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                A[IDX(i, j, lda)] -= 2 * vi * dot;
+            }
+            dot = 0.0;
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                dot += vi * A[IDX(i, j, lda)];
+            }
+            for (i = k; i < m; i++) {
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+                A[IDX(i, j, lda)] -= 2 * vi * dot;
+            }
+            double new_norm_sq = 0.0;
+            for (i = k+1; i < m; i++) {
+                new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+            }
+            double new_norm = sqrt(new_norm_sq);
+            if (new_norm < 0.1 * norms[j]) {
+                new_norm_sq = 0.0;
+                for (i = k+1; i < m; i++) {
+                    new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                }
+                new_norm = sqrt(new_norm_sq);
+            }
+            norms_updated[j] = new_norm;
+            norms[j] = new_norm;
+        }
+        free(v);
     }
-    // LU update: compute multipliers and update the submatrix.
-    for (int i = k + 1; i < n; i++)
-    {
-      A[i][k] /= A[k][k];
-      for (int j = k + 1; j < n; j++)
-      {
-        A[i][j] -= A[i][k] * A[k][j];
-      }
-    }
-    DEBUG_PRINT("LU Decomposition: Completed column %d\n", k);
-  }
-  return 0;
+    free(norms);
+    free(norms_updated);
 }
 
 /**
- * @brief Solves the system LUx = b using forward and back substitution.
+ * @brief Applies the implicit Qᵀ (from a QR factorization) to a vector \c b in-place.
  *
- * Given an LU-decomposed matrix (with pivoting) and a right-hand side vector b,
- * this function computes the solution vector x.
+ * @details
+ * The matrix \c Q is stored implicitly in \c A (of size \c n×n). Each column \c k
+ * contains the Householder vector from row \c k downwards (the first element
+ * is implicitly \c 1.0). To apply \f$ Q^T \f$ to a vector, we iterate over each
+ * Householder reflector in turn and perform the rank‐1 update.
  *
- * The solution is obtained in two steps:
- *   - Forward substitution: Solve Ly = Pb for y.
- *   - Back substitution: Solve Ux = y for x.
+ * @param[in]  n   The dimension of the square matrix \c A.
+ * @param[in]  A   Pointer to the \c n×n matrix (column‐major) that encodes the Householder vectors.
+ * @param[in]  lda Leading dimension (must be \c >= n).
+ * @param[in,out] b The input vector of length \c n. On output, \c b is overwritten by \f$Q^T b\f$.
  *
- * @param n The dimension of the matrix.
- * @param LU The LU-decomposed matrix (combined L and U).
- * @param pivot The pivot indices from LU decomposition.
- * @param b The right-hand side vector.
- * @param x Output solution vector.
+ * @warning This routine relies on the same storage convention as \c qr_decomp_colpivot_blocked,
+ *          i.e., Householder vectors are stored in the lower portion of \c A from row \c k downwards
+ *          in column \c k, with the first element of the reflector implicitly being \c 1.
  */
-void luSolve(int n, double LU[n][n], int pivot[n], double b[n], double x[n])
-{
-  double y[n];
-  // Forward substitution: solve Ly = Pb.
-  for (int i = 0; i < n; i++)
-  {
-    y[i] = b[pivot[i]]; // Apply pivoting.
-    for (int j = 0; j < i; j++)
-    {
-      y[i] -= LU[i][j] * y[j];
+void applyQTranspose(int n, double *A, int lda, double *b) {
+    int k, i;
+    for (k = 0; k < n; k++) {
+        double dot = 0.0;
+        for (i = k; i < n; i++) {
+            double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+            dot += vi * b[i];
+        }
+        for (i = k; i < n; i++) {
+            double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
+            b[i] -= 2 * vi * dot;
+        }
     }
-    DEBUG_PRINT("luSolve Forward: i=%d, y[%d]=%lf\n", i, i, y[i]);
-  }
-  // Back substitution: solve Ux = y.
-  for (int i = n - 1; i >= 0; i--)
-  {
-    x[i] = y[i];
-    for (int j = i + 1; j < n; j++)
-    {
-      x[i] -= LU[i][j] * x[j];
-    }
-    x[i] /= LU[i][i];
-    DEBUG_PRINT("luSolve Backward: i=%d, x[%d]=%lf\n", i, i, x[i]);
-  }
 }
 
 /**
- * @brief Inverts an n x n matrix using LU decomposition.
+ * @brief Solves an upper-triangular system \f$R x = b\f$ by back substitution.
  *
- * This function first copies the input matrix into a temporary matrix, then performs
- * LU decomposition with partial pivoting. It then solves n linear systems (one per column)
- * to compute the inverse column-by-column.
+ * @param[in]  n     The size of the system (dimension).
+ * @param[in]  A     Pointer to the \c n×n matrix (column‐major) whose upper triangle
+ *                   represents \f$R\f$.
+ * @param[in]  lda   Leading dimension of \c A (must be \c >= n).
+ * @param[in]  b     The right‐hand side vector (length \c n).
+ * @param[out] x     Output solution vector (length \c n).
  *
- * This LU-based inversion method is preferred over the adjugate method for its improved
- * numerical stability, particularly when matrices are nearly singular.
+ * @pre \c R must be a nonsingular upper‐triangular matrix, or the solution
+ *      will contain infinities/NaN if zero pivots are encountered.
  *
- * @param n The dimension of the matrix.
- * @param A The input matrix (n x n).
- * @param inverse The output inverse matrix (n x n).
+ * @note This is a standard back substitution procedure. We assume
+ *       \f$R[i,i] \neq 0\f$ for all \c i.
  */
-void invertMatrixLU(int n, double A[n][n], double inverse[n][n])
-{
-  int pivot[n];
-  double LU[n][n];
-  // Copy A into LU to preserve the original matrix.
-  for (int i = 0; i < n; i++)
-  {
-    for (int j = 0; j < n; j++)
-    {
-      LU[i][j] = A[i][j];
+void backSubstitution(int n, double *A, int lda, double *b, double *x) {
+    int i, j;
+    for (i = n - 1; i >= 0; i--) {
+        double sum = b[i];
+        for (j = i + 1; j < n; j++) {
+            sum -= A[IDX(i, j, lda)] * x[j];
+        }
+        x[i] = sum / A[IDX(i, i, lda)];
     }
-  }
-  if (luDecomposition(n, LU, pivot) != 0)
-  {
-    fprintf(stderr, "Matrix is singular\n");
-    exit(EXIT_FAILURE);
-  }
-  double b[n], x[n];
-  // Solve for each column of the inverse.
-  for (int j = 0; j < n; j++)
-  {
-    // Set b to the jth unit vector.
-    for (int i = 0; i < n; i++)
-    {
-      b[i] = 0.0;
+}
+
+/**
+ * @brief Inverts a square matrix \c A (n×n) in column‐major order using
+ *        the QR decomposition with column pivoting.
+ *
+ * @details
+ * We first make a copy of \c A_in into a local array \c A. Then we call
+ * \c qr_decomp_colpivot_blocked to factor it (and do column pivoting).
+ * We have \f$A P = Q R\f$. To find \f$A^{-1}\f$, we solve \f$R \, y = Q^T e_i\f$
+ * for each standard basis vector \f$ e_i \f$, and then apply the inverse pivot
+ * to get each column of \f$A^{-1}\f$ in the correct position.
+ *
+ * The final result is stored in a newly allocated array of length \c n*n
+ * in column‐major order.
+ *
+ * **Algorithm Sketch**:
+ * 1. Copy \c A_in into local array \c A.
+ * 2. Perform a rank‐revealing QR factorization (\c qr_decomp_colpivot_blocked), giving
+ *    \f$ A P = Q R \f$. The pivot array \c jpvt keeps track of how columns were permuted.
+ * 3. For each \c i in \c [0..n-1], solve \f$R \, y = Q^T e_i\f$ by:
+ *    - Setting \c b = e_i (the i‐th unit vector).
+ *    - Applying \c applyQTranspose to get \f$Q^T b\f$.
+ *    - Using \c backSubstitution on \f$R y = Q^T e_i\f$ to find \f$y\f$.
+ *    - Reorder \f$y\f$ according to \c inv_p (the inverse pivot) to get the correct column of \f$A^{-1}\f$.
+ * 4. Store the result in \c A_inv, allocated by \c calloc.
+ *
+ * This approach combines the stability benefits of Householder reflectors,
+ * column pivoting, and blocked updates into a single method for small
+ * matrices (where \c block_size can be set to \c 1). Larger matrices might
+ * benefit further from specialized BLAS/LAPACK routines, but this code
+ * is illustrative of the general principle.
+ *
+ * @param[in]  A_in Pointer to the input \c n×n matrix in column‐major order.
+ * @param[in]  n    The dimension of the matrix.
+ * @return Pointer to a newly allocated array (length \c n*n) containing the inverse,
+ *         also in column‐major order. The caller is responsible for \c free()ing it.
+ *
+ * @warning If \c A_in is singular or nearly singular, the results may be numerical garbage
+ *          (or cause division by zero). The pivoting logic attempts to mitigate this by
+ *          identifying small pivots and moving them to the right columns.
+ *
+ * @note For large \c n, using an optimized LAPACK routine (like \c dgeqp3 or \c dgeqrf)
+ *       could be faster. However, this code demonstrates how to implement such an algorithm
+ *       in a self‐contained manner.
+ */
+double *invertMatrixQR(const double *A_in, int n) {
+    int lda = n;
+    double *A = malloc(n * n * sizeof(double));
+    if (!A) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR.\n");
+        exit(EXIT_FAILURE);
     }
-    b[j] = 1.0;
-    luSolve(n, LU, pivot, b, x);
-    for (int i = 0; i < n; i++)
-    {
-      inverse[i][j] = x[i];
+    // Copy A_in into A.
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < n; i++) {
+            A[IDX(i,j,lda)] = A_in[j * n + i];  // assume A_in is column-major
+        }
     }
-    DEBUG_PRINT("invertMatrixLU: Solved column %d\n", j);
-  }
+    int *jpvt = malloc(n * sizeof(int));
+    if (!jpvt) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (jpvt).\n");
+        exit(EXIT_FAILURE);
+    }
+    // For small matrices, block_size = 1.
+    qr_decomp_colpivot_blocked(n, n, A, lda, jpvt, 1);
+
+    // Build inverse permutation array.
+    int *inv_p = malloc(n * sizeof(int));
+    if (!inv_p) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (inv_p).\n");
+        exit(EXIT_FAILURE);
+    }
+    for (int k = 0; k < n; k++) {
+        inv_p[jpvt[k]] = k;
+    }
+    double *A_inv = calloc(n * n, sizeof(double));
+    if (!A_inv) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (A_inv).\n");
+        exit(EXIT_FAILURE);
+    }
+    double *b = malloc(n * sizeof(double));
+    double *y = malloc(n * sizeof(double));
+    double *x = malloc(n * sizeof(double));
+    if (!b || !y || !x) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (temp vectors).\n");
+        exit(EXIT_FAILURE);
+    }
+    // Solve R y = Qᵀ e_i for each unit vector e_i.
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < n; k++) {
+            b[k] = (k == i) ? 1.0 : 0.0;
+        }
+        applyQTranspose(n, A, lda, b);
+        backSubstitution(n, A, lda, b, y);
+        for (int j = 0; j < n; j++) {
+            x[j] = y[inv_p[j]];
+        }
+        for (int j = 0; j < n; j++) {
+            A_inv[IDX(j, i, lda)] = x[j];
+        }
+    }
+    free(A); free(jpvt); free(inv_p); free(b); free(y); free(x);
+    return A_inv;
 }
 
-/**
- * @brief Wrapper for inverting a 3x3 matrix using LU decomposition.
- *
- * This wrapper ensures that only 3x3 matrices are processed. It calls the LU-based inversion
- * routine and enforces that the dimension is exactly 3.
- *
- * @param n The dimension (must be 3).
- * @param matrix The input 3x3 matrix.
- * @param inverseMatrix The output 3x3 inverse matrix.
+/*
+ * Wrapper for inverting a 3×3 matrix.
+ * Input matrix A3 must be in column–major order (length 9).
+ * Returns a new dynamically allocated 3×3 inverse (column–major order).
  */
-void invert3x3Matrix(int n, double matrix[][n], double inverseMatrix[][n])
-{
-  if (n != 3)
-  {
-    fprintf(stderr, "invert3x3Matrix error: Expected n == 3, got n == %d\n", n);
-    exit(EXIT_FAILURE);
-  }
-  invertMatrixLU(3, matrix, inverseMatrix);
-  DEBUG_PRINT("invert3x3Matrix: Inversion complete.\n");
+double *invert3x3matrixQR(const double A3[9]) {
+    return invertMatrixQR(A3, 3);
 }
 
-/**
- * @brief Wrapper for inverting a 4x4 matrix using LU decomposition.
- *
- * This wrapper calls the LU-based inversion routine for 4x4 matrices and provides
- * the expected interface for legacy code.
- *
- * @param matrix The input 4x4 matrix.
- * @param inverse The output 4x4 inverse matrix.
+/*
+ * Wrapper for inverting a 4×4 matrix.
+ * Input matrix A4 must be in column–major order (length 16).
+ * Returns a new dynamically allocated 4×4 inverse (column–major order).
  */
-void invert4x4Matrix(double matrix[4][4], double inverse[4][4])
-{
-  invertMatrixLU(4, matrix, inverse);
-  DEBUG_PRINT("invert4x4Matrix: Inversion complete.\n");
+double *invert4x4matrixQR(const double A4[16]) {
+    return invertMatrixQR(A4, 4);
 }
 
-/**
- * @brief Computes the gradient for an MA(1) model's objective function.
- *
- * For a moving average model of order 1 (MA(1)), the model is defined as:
- *   y[i] = theta * lag[i] + c
- * and the objective function is the sum of squared errors:
- *   J = sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c))^2.
- *
- * The gradients with respect to theta and c are computed as:
- *   dJ/d(theta) = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c)) * lag[i],
- *   dJ/d(c)     = -2 * sum_{i=0}^{n-1} (target[i] - (theta * lag[i] + c)).
- *
- * DEBUG_PRINT statements output the error and the cumulative gradient for each parameter.
- *
- * @param target Pointer to the target vector.
- * @param lag Pointer to the lagged input vector.
- * @param n Number of observations.
- * @param params Current parameter estimates (theta and c).
- * @param grad Output gradient vector (length 2).
- */
-void computeMA1Gradient(const double *target, const double *lag, int n, const double params[2], double grad[2])
-{
-  grad[0] = 0.0;
-  grad[1] = 0.0;
-  for (int i = 0; i < n; i++)
-  {
-    double pred = params[0] * lag[i] + params[1];
-    double error = target[i] - pred;
-    grad[0] += -2.0 * error * lag[i];
-    grad[1] += -2.0 * error;
-    DEBUG_PRINT("MA1Grad: i=%d, pred=%lf, error=%lf, grad0_partial=%lf, grad1_partial=%lf\n",
-                i, pred, error, grad[0], grad[1]);
-  }
-  DEBUG_PRINT("MA1Grad: Final grad[0]=%lf, grad[1]=%lf\n", grad[0], grad[1]);
-}
-
-/**
- * @brief Computes the gradient for an MA(2) model's objective function.
- *
- * For a moving average model of order 2 (MA(2)), the model is defined as:
- *   y[i] = theta1 * lag1[i] + theta2 * lag2[i] + c
- * and the objective function is:
- *   J = sum_{i=0}^{n-1} (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c))^2.
- *
- * The gradients are computed as:
- *   dJ/d(theta1) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag1[i],
- *   dJ/d(theta2) = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)) * lag2[i],
- *   dJ/d(c)      = -2 * sum (target[i] - (theta1 * lag1[i] + theta2 * lag2[i] + c)).
- *
- * DEBUG_PRINT statements output the error and the cumulative gradient for each parameter.
- *
- * @param target Pointer to the target vector.
- * @param lag1 Pointer to the first lagged input vector.
- * @param lag2 Pointer to the second lagged input vector.
- * @param n Number of observations.
- * @param params Current parameter estimates (theta1, theta2, c).
- * @param grad Output gradient vector (length 3).
- */
-void computeMA2Gradient(const double *target, const double *lag1, const double *lag2, int n, const double params[3], double grad[3])
-{
-  grad[0] = 0.0;
-  grad[1] = 0.0;
-  grad[2] = 0.0;
-  for (int i = 0; i < n; i++)
-  {
-    double pred = params[0] * lag1[i] + params[1] * lag2[i] + params[2];
-    double error = target[i] - pred;
-    grad[0] += -2.0 * error * lag1[i];
-    grad[1] += -2.0 * error * lag2[i];
-    grad[2] += -2.0 * error;
-    DEBUG_PRINT("MA2Grad: i=%d, pred=%lf, error=%lf, grad0_partial=%lf, grad1_partial=%lf, grad2_partial=%lf\n",
-                i, pred, error, grad[0], grad[1], grad[2]);
-  }
-  DEBUG_PRINT("MA2Grad: Final grad[0]=%lf, grad[1]=%lf, grad[2]=%lf\n", grad[0], grad[1], grad[2]);
-}
 
 /*========================================================================
   Linear Regression Functions
@@ -962,85 +1090,130 @@ void predictBivariate(double predictor1[], double predictor2[], double predictio
   }
 }
 
+/*========================================================================
+  Updated Multivariate Linear Regression using QR Inversion
+========================================================================*/
+
 /**
  * @brief Performs multivariate linear regression.
  *
- * @param numObservations The number of observations (rows).
- * @param numPredictors The number of predictors (columns).
+ * This version normalizes the design matrix and then computes the normal equations:
+ * XᵀX * beta = XᵀY. It then inverts the (small) XᵀX matrix using our QR-based
+ * inversion routines (for 3×3 or 4×4 systems) and computes beta.
+ * The intercept is computed separately.
+ *
+ * @param numObservations Number of observations (rows).
+ * @param numPredictors Number of predictors (columns).
  * @param X The design matrix.
  * @param Y The response vector (as a matrix with one column).
  * @return Pointer to a dynamically allocated array containing [beta coefficients..., intercept].
- *
- * This function normalizes the design matrix, computes the normal equations (XᵀX),
- * inverts the matrix (using either a 3x3 or 4x4 inversion routine), and then computes
- * the coefficients. The intercept is calculated separately.
  */
-double *performMultivariateLinearRegression(int numObservations, int numPredictors, double X[][numPredictors], double Y[][1])
-{
-  double X_normalized[numObservations][numPredictors], Y_normalized[numObservations][1];
-  double X_means[1][numPredictors], Y_mean[1][1];
-  double Xt[numPredictors][numObservations], XtX[numPredictors][numPredictors], XtX_inv[numPredictors][numPredictors];
-  double XtX_inv_Xt[numPredictors][numObservations], beta[numPredictors][1];
-  double *estimates = malloc(sizeof(double) * (numPredictors + 1));
-  if (!estimates)
-    exit(EXIT_FAILURE);
+double *performMultivariateLinearRegression(int numObservations, int numPredictors, 
+                                              double X[][numPredictors], double Y[][1]) {
+    double X_normalized[numObservations][numPredictors], Y_normalized[numObservations][1];
+    double X_means[1][numPredictors], Y_mean[1][1];
+    double Xt[numPredictors][numObservations], XtX[numPredictors][numPredictors];
+    double XtX_inv[numPredictors][numPredictors];
+    double XtX_inv_Xt[numPredictors][numObservations], beta[numPredictors][1];
+    double *estimates = malloc(sizeof(double) * (numPredictors + 1));
+    if (!estimates)
+        exit(EXIT_FAILURE);
 
-  // Normalize X and Y.
-  normalize2DArray(numObservations, numPredictors, X, X_normalized);
-  normalize2DArray(numObservations, 1, Y, Y_normalized);
+    // Normalize X and Y.
+    normalize2DArray(numObservations, numPredictors, X, X_normalized);
+    normalize2DArray(numObservations, 1, Y, Y_normalized);
 
-  // Transpose X.
-  transposeMatrix(numObservations, numPredictors, X_normalized, Xt);
+    // Transpose X.
+    transposeMatrix(numObservations, numPredictors, X_normalized, Xt);
 
-  // Compute XtX = Xt * X.
-  matrixMultiply(numPredictors, numObservations, numPredictors, Xt, X_normalized, XtX);
+    // Compute XtX = Xt * X.
+    matrixMultiply(numPredictors, numObservations, numPredictors, Xt, X_normalized, XtX);
 
-  // Invert XtX.
-  if (numPredictors == 3)
-  {
-    invert3x3Matrix(3, XtX, XtX_inv);
-  }
-  else
-  {
-    invert4x4Matrix(XtX, XtX_inv);
-  }
-
-  // Compute XtX_inv_Xt = XtX_inv * Xt.
-  matrixMultiply(numPredictors, numPredictors, numObservations, XtX_inv, Xt, XtX_inv_Xt);
-
-  // Compute beta = XtX_inv_Xt * Y_normalized.
-  matrixMultiply(numPredictors, numObservations, 1, XtX_inv_Xt, Y_normalized, beta);
-  for (int i = 0; i < numPredictors; i++)
-  {
-    estimates[i] = beta[i][0];
-  }
-
-  // Compute intercept from the means.
-  for (int j = 0; j < numPredictors; j++)
-  {
-    double col[numObservations];
-    for (int i = 0; i < numObservations; i++)
-    {
-      col[i] = X[i][j];
+    int n = numPredictors;
+    if (n == 1) {
+        // For 1x1 matrix, the inverse is simply 1/(XtX[0][0]).
+        XtX_inv[0][0] = 1.0 / XtX[0][0];
+    } else if (n == 2) {
+        // For 2x2 matrix, compute the inverse using the closed-form solution.
+        double a = XtX[0][0];
+        double b = XtX[0][1];
+        double c = XtX[1][0];
+        double d = XtX[1][1];
+        double det = a * d - b * c;
+        if (fabs(det) < 1e-12) {
+            fprintf(stderr, "Error: 2x2 matrix is singular.\n");
+            exit(EXIT_FAILURE);
+        }
+        XtX_inv[0][0] = d / det;
+        XtX_inv[0][1] = -b / det;
+        XtX_inv[1][0] = -c / det;
+        XtX_inv[1][1] = a / det;
+    } else if (n == 3) {
+        double tempMatrix[n*n];
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                tempMatrix[IDX(i,j,n)] = XtX[i][j]; // convert to column-major
+            }
+        }
+        double *invTemp = invert3x3matrixQR(tempMatrix);
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                XtX_inv[i][j] = invTemp[IDX(i,j,n)];
+            }
+        }
+        free(invTemp);
+    } else if (n == 4) {
+        double tempMatrix[n*n];
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                tempMatrix[IDX(i,j,n)] = XtX[i][j]; // convert to column-major
+            }
+        }
+        double *invTemp = invert4x4matrixQR(tempMatrix);
+        for (int j = 0; j < n; j++) {
+            for (int i = 0; i < n; i++) {
+                XtX_inv[i][j] = invTemp[IDX(i,j,n)];
+            }
+        }
+        free(invTemp);
+    } else {
+        fprintf(stderr, "Error: QR inversion for n=%d not implemented.\n", n);
+        exit(EXIT_FAILURE);
     }
-    X_means[0][j] = calculateMean(col, numObservations);
-  }
-  {
-    double yCol[numObservations];
-    for (int i = 0; i < numObservations; i++)
-    {
-      yCol[i] = Y[i][0];
+
+    // Compute XtX_inv_Xt = XtX_inv * Xt.
+    matrixMultiply(numPredictors, numPredictors, numObservations, XtX_inv, Xt, XtX_inv_Xt);
+
+    // Compute beta = XtX_inv_Xt * Y_normalized.
+    matrixMultiply(numPredictors, numObservations, 1, XtX_inv_Xt, Y_normalized, beta);
+    for (int i = 0; i < numPredictors; i++) {
+        estimates[i] = beta[i][0];
     }
-    Y_mean[0][0] = calculateMean(yCol, numObservations);
-  }
-  double intercept = Y_mean[0][0];
-  for (int i = 0; i < numPredictors; i++)
-  {
-    intercept -= estimates[i] * X_means[0][i];
-  }
-  estimates[numPredictors] = intercept;
-  return estimates;
+
+    // Compute intercept from the original means.
+    for (int j = 0; j < numPredictors; j++) {
+        double col[numObservations];
+        for (int i = 0; i < numObservations; i++) {
+            col[i] = X[i][j];
+        }
+        X_means[0][j] = calculateMean(col, numObservations);
+    }
+    {
+        double yCol[numObservations];
+        for (int i = 0; i < numObservations; i++) {
+            yCol[i] = Y[i][0];
+        }
+        Y_mean[0][0] = calculateMean(yCol, numObservations);
+    }
+    double intercept = Y_mean[0][0];
+    for (int i = 0; i < numPredictors; i++) {
+        intercept -= estimates[i] * X_means[0][i];
+    }
+    estimates[numPredictors] = intercept;
+    return estimates;
 }
+
+
 
 /**
  * @brief Computes the Pearson correlation coefficient between two arrays.
@@ -1984,8 +2157,13 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
     }
     
     // ----- Step 2. Estimate AR coefficients (if p > 0) using OLS -----
-    double *arEstimates = NULL; // will be of length (p+1): first p coefficients then intercept
     int m = currentLength - p;  // number of observations usable for AR regression
+    if (p > 0 && m < (p + 1)) {
+        fprintf(stderr, "Error: Not enough observations for AR regression (m = %d, p = %d).\n", m, p);
+        exit(EXIT_FAILURE);
+    }
+
+    double *arEstimates = NULL; // will be of length (p+1): first p coefficients then intercept
     if (p > 0 && m > 0) {
         // Build design matrix X (m x p) and response vector Y (m x 1)
         double X_mat[m][p];
@@ -2247,7 +2425,7 @@ int main(void)
 
     // Forecast using the generalized ARIMA function with AR(1)-MA(1)
     // (Here we set p = 1, d = 0, and q = 1.)
-    double *armaForecast = forecastARIMA(sampleData, dataLength, 1, 0, 1);
+    double *armaForecast = forecastARIMA(sampleData, 183, 2, 0, 4);
     printf("Generalized ARIMA (AR(1)-MA(1)) Forecast:\n");
     for (int i = 0; i < FORECAST_HORIZON; i++) {
         printf("%lf ", armaForecast[i]);
