@@ -1073,11 +1073,6 @@ double adfPValue(double tstat, int modelType) {
  * - \( r_k = \frac{\sum_{t=1}^{n-k} (y_t - \bar{y})(y_{t+k} - \bar{y})}{\sum_{t=1}^{n} (y_t - \bar{y})^2} \)
  * - Computes the mean \( \bar{y} \), then numerator and denominator separately.
  *
- * **Why This Method**: 
- * - **Statistical Standard**: Widely accepted for measuring serial correlation in time series, directly 
- *   applicable to ARIMA’s ACF-based diagnostics.
- * - **Efficiency**: Simple computation with \( O(n) \) complexity per lag.
- *
  * **Downsides and Limitations**:
  * - **Stationarity Assumption**: Assumes the series is stationary; non-stationary series yield 
  *   misleading ACF values.
@@ -1507,7 +1502,6 @@ int checkRoots(double coeffs[], int order, int isAR) {
  * **Method Used**: 
  * - Computes the ACF of residuals up to lag \( q \).
  * - Sets \( \theta_i = r_{i+1} * 0.5 \), scaling down ACF values to avoid overestimation.
- *
  *
  * @param residuals Residuals from AR fit (or original series if no AR).
  * @param length Length of residuals.
@@ -2176,7 +2170,6 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
  * - **Simplicity**: Reuses existing ACF computation, focusing on a key summary statistic.
  * 
  * **Downsides and Limitations**:
- * - **Stationarity**: Assumes residuals are stationary; non-stationary residuals skew results.
  * - **Threshold**: Max value alone lacks context; should be paired with significance bounds (e.g., 2/√n).
  * 
  * Used in `main` to evaluate ARIMA fit post-forecasting, aiding model validation.
