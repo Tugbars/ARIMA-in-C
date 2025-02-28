@@ -1,7 +1,3 @@
-Below is an updated and comprehensive documentation for your ARIMA implementation in C, designed for a GitHub README. It follows the formatting style of your old documentation (e.g., LaTeX equations framed with `![Equation](...)`, white text color for visibility in dark themes), while adopting a more organic explanatory flow with titles used to emphasize key sections rather than as rigid separators. Since we developed this code together, I’ve incorporated all methods, design decisions, improvements, and rationales we discussed, ensuring an elaborate and detailed explanation tailored to your implementation.
-
----
-
 # ARIMA Implementation – Design Decisions and Rationale
 
 This ARIMA (AutoRegressive Integrated Moving Average) forecasting implementation in C is crafted to be modular, robust, and adaptable, breaking the complex ARIMA process into distinct, mathematically grounded steps. Each component reflects deliberate design choices aimed at balancing accuracy, computational efficiency, and resilience to real-world data challenges (e.g., outliers in `sampleData`). Below, I’ll walk through how the system works, why we made these choices, and the trade-offs involved, weaving in the improvements we iterated on together.
@@ -126,7 +122,5 @@ Why this approach? We aimed for robustness (Huber, QR), automation (ADF, order s
 - Gradient approximations may bias estimates slightly.
 - Limited \( d > 1 \) support in integration.
 - Simplified variance underestimates long-term uncertainty.
-
-This implementation shines for ARIMA(2,1,4) on noisy series, balancing theory and practice effectively.
 
 ---
