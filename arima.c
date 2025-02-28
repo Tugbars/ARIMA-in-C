@@ -396,33 +396,42 @@ void matrixMultiply(int rowsA, int colsA, int colsB, double A[][colsA], double B
  */
 void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int block_size) {
     int i, j, k, nb;
-
+    
     double *norms = malloc(n * sizeof(double));
     double *norms_updated = malloc(n * sizeof(double));
     if (!norms || !norms_updated) {
         fprintf(stderr, "Memory allocation error in qr_decomp_colpivot_blocked.\n");
         exit(EXIT_FAILURE);
     }
-
+    
+    // Compute initial column norms.
     for (j = 0; j < n; j++) {
         jpvt[j] = j;
         double sum = 0.0;
         for (i = 0; i < m; i++) {
-            double aij = A[IDX(i,j,lda)];
+            double aij = A[IDX(i, j, lda)];
             sum += aij * aij;
         }
         norms[j] = sqrt(sum);
         norms_updated[j] = norms[j];
+        if (norms[j] < SINGULARITY_THRESHOLD) {
+            fprintf(stderr, "Warning: Column %d is nearly singular (norm = %e).\n", j, norms[j]);
+            // Optionally, you can set the norm to the threshold to avoid division by nearly zero.
+            norms[j] = SINGULARITY_THRESHOLD;
+            norms_updated[j] = SINGULARITY_THRESHOLD;
+        }
     }
-
+    
+    // Main factorization loop.
     for (k = 0; k < n && k < m; k++) {
-        // Column pivoting: find column with max updated norm.
+        // Column pivoting: find the column with the maximum updated norm.
         int max_index = k;
         for (j = k; j < n; j++) {
             if (norms_updated[j] > norms_updated[max_index])
                 max_index = j;
         }
         if (max_index != k) {
+            // Swap columns k and max_index.
             for (i = 0; i < m; i++) {
                 double tmp = A[IDX(i, k, lda)];
                 A[IDX(i, k, lda)] = A[IDX(i, max_index, lda)];
@@ -431,7 +440,7 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             int tmp_int = jpvt[k];
             jpvt[k] = jpvt[max_index];
             jpvt[max_index] = tmp_int;
-
+            
             double tmp_norm = norms_updated[k];
             norms_updated[k] = norms_updated[max_index];
             norms_updated[max_index] = tmp_norm;
@@ -439,16 +448,21 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             norms[k] = norms[max_index];
             norms[max_index] = tmp_norm;
         }
-        // Compute Householder vector for column k.
+        
+        // Compute the 2–norm of the k–th column from row k onward.
         double norm_x = 0.0;
         for (i = k; i < m; i++) {
             norm_x += A[IDX(i, k, lda)] * A[IDX(i, k, lda)];
         }
         norm_x = sqrt(norm_x);
-        if (norm_x == 0.0) {
+        
+        // Robust handling: if the pivot norm is nearly zero, warn and set pivot to zero.
+        if (norm_x < SINGULARITY_THRESHOLD) {
+            fprintf(stderr, "Warning: Nearly singular pivot encountered at column %d (norm = %e). Setting pivot to zero.\n", k, norm_x);
             A[IDX(k, k, lda)] = 0.0;
-            continue;
+            continue;  // Skip reflector computation for this column.
         }
+        
         double sign = (A[IDX(k, k, lda)] >= 0) ? -1.0 : 1.0;
         double *v = malloc((m - k) * sizeof(double));
         if (!v) {
@@ -464,15 +478,21 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             norm_v += v[i] * v[i];
         }
         norm_v = sqrt(norm_v);
-        if (norm_v != 0) {
-            for (i = 0; i < m - k; i++) {
-                v[i] /= norm_v;
-            }
+        if (norm_v < SINGULARITY_THRESHOLD) {
+            fprintf(stderr, "Warning: Householder vector nearly zero at column %d.\n", k);
+            free(v);
+            continue;
         }
+        // Normalize the Householder vector.
+        for (i = 0; i < m - k; i++) {
+            v[i] /= norm_v;
+        }
+        // Store the reflector.
         A[IDX(k, k, lda)] = sign * norm_x;
         for (i = k + 1; i < m; i++) {
             A[IDX(i, k, lda)] = v[i - k];
         }
+        
         // Blocked update of trailing columns.
         nb = ((k + block_size) < n) ? block_size : (n - k);
         for (j = k + 1; j < k + nb; j++) {
@@ -485,7 +505,7 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
                 A[IDX(i, j, lda)] -= 2 * vi * dot;
             }
-            // Reorthogonalization pass.
+            // Reorthogonalization pass to improve stability.
             dot = 0.0;
             for (i = k; i < m; i++) {
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
@@ -495,17 +515,24 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
                 A[IDX(i, j, lda)] -= 2 * vi * dot;
             }
+            // Update the norm.
             double new_norm_sq = 0.0;
             for (i = k+1; i < m; i++) {
                 new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
             }
             double new_norm = sqrt(new_norm_sq);
+            // If the new norm is very small, warn and set it to zero.
             if (new_norm < 0.1 * norms[j]) {
-                new_norm_sq = 0.0;
-                for (i = k+1; i < m; i++) {
-                    new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                if (new_norm < SINGULARITY_THRESHOLD) {
+                    fprintf(stderr, "Warning: Updated norm for column %d is nearly singular (new_norm = %e).\n", j, new_norm);
+                    new_norm = 0.0;
+                } else {
+                    new_norm_sq = 0.0;
+                    for (i = k+1; i < m; i++) {
+                        new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                    }
+                    new_norm = sqrt(new_norm_sq);
                 }
-                new_norm = sqrt(new_norm_sq);
             }
             norms_updated[j] = new_norm;
             norms[j] = new_norm;
@@ -535,11 +562,16 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             }
             double new_norm = sqrt(new_norm_sq);
             if (new_norm < 0.1 * norms[j]) {
-                new_norm_sq = 0.0;
-                for (i = k+1; i < m; i++) {
-                    new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                if (new_norm < SINGULARITY_THRESHOLD) {
+                    fprintf(stderr, "Warning: Updated norm for column %d is nearly singular (new_norm = %e).\n", j, new_norm);
+                    new_norm = 0.0;
+                } else {
+                    new_norm_sq = 0.0;
+                    for (i = k+1; i < m; i++) {
+                        new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
+                    }
+                    new_norm = sqrt(new_norm_sq);
                 }
-                new_norm = sqrt(new_norm_sq);
             }
             norms_updated[j] = new_norm;
             norms[j] = new_norm;
