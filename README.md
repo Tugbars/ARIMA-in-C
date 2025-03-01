@@ -70,7 +70,7 @@ Starting with the last observed value \( y_t \), it sums the differenced forecas
 
 ---
 
-### Parameter Estimation
+### AR/MA Parameter Estimation
 
 With a stationary series, we estimate AR and MA parameters. For AR, `estimateARWithCMLE` models:
 
