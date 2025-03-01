@@ -691,32 +691,111 @@ void backSubstitution(int n, double *A, int lda, double *b, double *x) {
  *       in a self‐contained manner.
  */
 double *invertMatrixQR(const double *A_in, int n) {
+    // Leading dimension in column-major format
     int lda = n;
+
+    // Allocate a buffer A to store the matrix in column-major order.
     double *A = malloc(n * n * sizeof(double));
-    if (!A) { fprintf(stderr, "Memory allocation error in invertMatrixQR.\n"); exit(EXIT_FAILURE); }
-    for (int j = 0; j < n; j++) {
-        for (int i = 0; i < n; i++) A[IDX(i, j, lda)] = A_in[j * n + i];
+    if (!A) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR.\n");
+        exit(EXIT_FAILURE);
     }
+
+    // Copy A_in (row-major) into A (column-major).
+    // IDX(i, j, lda) presumably expands to j*lda + i for 2D indexing.
+    // This loop transposes the data from row-major to column-major.
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < n; i++) {
+            A[IDX(i, j, lda)] = A_in[j * n + i];
+        }
+    }
+
+    // Allocate memory for the pivot array (jpvt), which indicates column
+    // permutations during the QR factorization (column pivoting).
     int *jpvt = malloc(n * sizeof(int));
-    if (!jpvt) { fprintf(stderr, "Memory allocation error in invertMatrixQR (jpvt).\n"); exit(EXIT_FAILURE); }
+    if (!jpvt) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (jpvt).\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Perform a blocked QR decomposition with column pivoting on matrix A.
+    // The pivot array jpvt will hold the final column ordering.
+    // The function signature is presumed: qr_decomp_colpivot_blocked(rows, cols, A, lda, jpvt, block_size).
     qr_decomp_colpivot_blocked(n, n, A, lda, jpvt, 1);
+
+    // Allocate an array to hold the inverse permutation. 
+    // inv_p[j] tells us where the j-th column ended up after pivoting.
     int *inv_p = malloc(n * sizeof(int));
-    if (!inv_p) { fprintf(stderr, "Memory allocation error in invertMatrixQR (inv_p).\n"); exit(EXIT_FAILURE); }
-    for (int k = 0; k < n; k++) inv_p[jpvt[k]] = k;
+    if (!inv_p) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (inv_p).\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Compute the inverse of the pivot array:
+    // For each column k, we set inv_p[jpvt[k]] = k.
+    // This allows us to reorder the solution vector after back-substitution.
+    for (int k = 0; k < n; k++) {
+        inv_p[jpvt[k]] = k;
+    }
+
+    // Allocate space for the inverse of A. Zero-initialized (calloc).
     double *A_inv = calloc(n * n, sizeof(double));
-    if (!A_inv) { fprintf(stderr, "Memory allocation error in invertMatrixQR (A_inv).\n"); exit(EXIT_FAILURE); }
+    if (!A_inv) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (A_inv).\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Temporary vectors used for solving each column of the identity system.
+    // b: will hold the i-th column of the identity
+    // y: will hold the intermediate result of back-substitution in the pivoted system
+    // x: final solution re-ordered back via inv_p
     double *b = malloc(n * sizeof(double));
     double *y = malloc(n * sizeof(double));
     double *x = malloc(n * sizeof(double));
-    if (!b || !y || !x) { fprintf(stderr, "Memory allocation error in invertMatrixQR (temp vectors).\n"); exit(EXIT_FAILURE); }
-    for (int i = 0; i < n; i++) {
-        for (int k = 0; k < n; k++) b[k] = (k == i) ? 1.0 : 0.0;
-        applyQTranspose(n, A, lda, b);
-        backSubstitution(n, A, lda, b, y);
-        for (int j = 0; j < n; j++) x[j] = y[inv_p[j]];
-        for (int j = 0; j < n; j++) A_inv[IDX(j, i, lda)] = x[j];
+    if (!b || !y || !x) {
+        fprintf(stderr, "Memory allocation error in invertMatrixQR (temp vectors).\n");
+        exit(EXIT_FAILURE);
     }
-    free(A); free(jpvt); free(inv_p); free(b); free(y); free(x);
+
+    // For each column i of the identity matrix:
+    // 1) Set b to the i-th column of the identity (1 at row i, 0 otherwise).
+    // 2) Apply Q^T to b (applyQTranspose), which transforms the system for
+    //    the next step with R.
+    // 3) Perform back-substitution in the upper triangular R to get y.
+    // 4) Reorder the solution y using the inverse pivot array inv_p to get x.
+    // 5) Store x in the corresponding column of A_inv.
+    for (int i = 0; i < n; i++) {
+        // Initialize b to the i-th column of identity
+        for (int k = 0; k < n; k++) {
+            b[k] = (k == i) ? 1.0 : 0.0;
+        }
+
+        // Multiply b by Q^T: effectively solving Q^T * b = R * y
+        applyQTranspose(n, A, lda, b);
+
+        // Solve R * y = Q^T * b by back-substitution
+        backSubstitution(n, A, lda, b, y);
+
+        // Reorder the solution according to the inverse pivot array
+        for (int j = 0; j < n; j++) {
+            x[j] = y[inv_p[j]];
+        }
+
+        // Place the re-ordered solution x into the i-th column of A_inv
+        for (int j = 0; j < n; j++) {
+            A_inv[IDX(j, i, lda)] = x[j];
+        }
+    }
+
+    // Free all temporary buffers before returning
+    free(A);
+    free(jpvt);
+    free(inv_p);
+    free(b);
+    free(y);
+    free(x);
+
+    // Return pointer to the inverse matrix (column-major format)
     return A_inv;
 }
 
@@ -1072,6 +1151,11 @@ double adfPValue(double tstat, int modelType) {
  * **Method Used**: Standard sample autocorrelation formula:
  * - \( r_k = \frac{\sum_{t=1}^{n-k} (y_t - \bar{y})(y_{t+k} - \bar{y})}{\sum_{t=1}^{n} (y_t - \bar{y})^2} \)
  * - Computes the mean \( \bar{y} \), then numerator and denominator separately.
+ *
+ * **Why This Method**: 
+ * - **Statistical Standard**: Widely accepted for measuring serial correlation in time series, directly 
+ *   applicable to ARIMA’s ACF-based diagnostics.
+ * - **Efficiency**: Simple computation with \( O(n) \) complexity per lag.
  *
  * **Downsides and Limitations**:
  * - **Stationarity Assumption**: Assumes the series is stationary; non-stationary series yield 
@@ -1502,6 +1586,7 @@ int checkRoots(double coeffs[], int order, int isAR) {
  * **Method Used**: 
  * - Computes the ACF of residuals up to lag \( q \).
  * - Sets \( \theta_i = r_{i+1} * 0.5 \), scaling down ACF values to avoid overestimation.
+ *
  *
  * @param residuals Residuals from AR fit (or original series if no AR).
  * @param length Length of residuals.
@@ -2170,6 +2255,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
  * - **Simplicity**: Reuses existing ACF computation, focusing on a key summary statistic.
  * 
  * **Downsides and Limitations**:
+ * - **Stationarity**: Assumes residuals are stationary; non-stationary residuals skew results.
  * - **Threshold**: Max value alone lacks context; should be paired with significance bounds (e.g., 2/√n).
  * 
  * Used in `main` to evaluate ARIMA fit post-forecasting, aiding model validation.
