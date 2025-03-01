@@ -1592,8 +1592,8 @@ int checkRoots(double coeffs[], int order, int isAR) {
         double mag = cabs(roots[i]); // Compute complex magnitude
         if (mag <= ROOT_TOLERANCE) {
             // Root inside or on unit circle violates condition
-            fprintf(stderr, "Warning: %s root magnitude %.4f <= %.4f\n", 
-                    isAR ? "AR" : "MA", mag, ROOT_TOLERANCE);
+            //fprintf(stderr, "Warning: %s root magnitude %.4f <= %.4f\n", 
+            //        isAR ? "AR" : "MA", mag, ROOT_TOLERANCE);
             valid = 0;
         }
     }
@@ -2017,58 +2017,150 @@ void hannanRissanenMAInit(double residuals[], int length, int q, double theta[])
 }
 
 /**
- * Dynamically selects AR and MA orders for ARIMA using ACF and PACF diagnostics.
- * 
- * The algorithm computes the ACF to identify MA order (q) based on significant lags, and iteratively computes PACF via Yule-Walker
- * to determine AR order (p) where partial correlations drop below a significance threshold (2/√n). It ensures minimum orders of 1
- * if significant lags are found, approximating the series structure y_t = Σφ_j y_{t-j} + Σθ_k ε_{t-k} + ε_t.
- * 
- * Used in ARIMA to automate order selection, enhancing model fit. Exists to adaptively choose p and q based on data-driven
- * statistical significance, reducing manual tuning and improving forecast accuracy.
- * 
- * @param series Input time series.
- * @param length Length of the series.
- * @param maxLag Maximum lag to check.
- * @param finalAR Output pointer for AR order (p).
- * @param finalMA Output pointer for MA order (q).
+ * @brief Computes the log-likelihood of an ARIMA(p, d, q) model for a given time series.
+ *
+ * @details
+ * Fits an ARIMA model by differencing the series, estimating AR and MA parameters,
+ * and calculates the log-likelihood assuming Gaussian errors: 
+ * LL = -n/2 * (ln(2π) + ln(σ²) + 1) - Σ(e_t²)/(2σ²), where σ² is the residual variance.
+ * Used by AIC to balance fit and complexity.
+ *
+ * **Why Updated**: Added explicit variance estimation and sample-size adjustment to ensure
+ * accurate likelihoods, fixing issues where simple models were over-favored.
+ *
+ * @param series The input time series array.
+ * @param length The number of observations in the series.
+ * @param p The AR order (number of autoregressive terms).
+ * @param d The differencing order (to achieve stationarity).
+ * @param q The MA order (number of moving average terms).
+ * @return The log-likelihood of the fitted ARIMA model.
  */
-void selectOrdersWithFeedback(const double series[], int length, int maxLag, int *finalAR, int *finalMA) {
-    // Step 1: Compute ACF to estimate MA order
-    double acf[maxLag + 1];
-    computeACF(series, length, maxLag, acf);
-    int p = 0, q = 0;
+double computeARIMALogLikelihood(double *series, int length, int p, int d, int q) {
+    // Step 1: Difference the series 'd' times to make it stationary
+    double *diff = differenceSeries(series, length, d);
+    int diffLength = length - d;
 
-    // Step 2: Identify significant ACF lags for q
-    // Why: MA(q) has ACF significant up to lag q, then drops
-    for (int i = 1; i <= maxLag; i++) {
-        if (fabs(acf[i]) > 2.0 / sqrt(length)) { // Threshold: |r_k| > 2/√n (approx 95% CI)
-            q = i; // Last significant lag suggests MA order
-        } else {
-            break; // Stop at first insignificant lag
+    // Step 2: Allocate space for AR coefficients (p terms + intercept)
+    double phi[p + 1];
+    double *theta = NULL;
+
+    // Step 3: Estimate AR parameters using Conditional MLE
+    estimateARWithCMLE(diff, diffLength, p, phi);
+
+    // Step 4: Compute AR residuals
+    int residLength = diffLength - p;
+    double *res = malloc(residLength * sizeof(double));
+    if (!res) { free(diff); exit(EXIT_FAILURE); }
+    for (int t = p; t < diffLength; t++) {
+        double pred = phi[p]; // Intercept
+        for (int j = 0; j < p; j++) {
+            pred += phi[j] * diff[t - j - 1];
         }
+        res[t - p] = diff[t] - pred;
     }
 
-    // Step 3: Compute PACF to estimate AR order
-    // Why: AR(p) has PACF significant up to lag p, then drops
-    double pacf[maxLag + 1];
-    pacf[0] = 1.0; // PACF at lag 0 is always 1
-    for (int k = 1; k <= maxLag; k++) {
-        double phi[k + 1];
-        yuleWalker(series, length, k, phi); // Fit AR(k) to get φ_k
-        pacf[k] = phi[k - 1]; // PACF_k = φ_k from AR(k) fit
-        if (fabs(pacf[k]) > 2.0 / sqrt(length)) { // Threshold: |φ_k| > 2/√n
-            p = k; // Last significant lag suggests AR order
-        } else {
-            break; // Stop at first insignificant lag
+    // Step 5: Estimate MA parameters if q > 0 and adjust residuals
+    if (q > 0) {
+        theta = estimateMAWithMLE(res, residLength, q);
+        double *maRes = malloc(residLength * sizeof(double));
+        if (!maRes) { free(diff); free(res); if (theta) free(theta); exit(EXIT_FAILURE); }
+        for (int t = q; t < residLength; t++) {
+            double pred = theta[q]; // MA intercept
+            for (int j = 0; j < q; j++) {
+                pred += theta[j] * res[t - j - 1];
+            }
+            maRes[t] = res[t] - pred; // Final residuals after MA
         }
+        free(res);
+        res = maRes;
     }
 
-    // Step 4: Set final orders, ensuring minimum of 1 if significant lags found
-    // Why: Avoids degenerate models (p=0, q=0) when data suggests structure
-    *finalAR = p > 0 ? p : 1;
-    *finalMA = q > 0 ? q : 1;
+    // Step 6: Compute residual variance
+    double sum_sq = 0.0;
+    int n = q > 0 ? residLength - q : residLength; // Effective sample size
+    for (int i = 0; i < n; i++) {
+        sum_sq += res[i] * res[i];
+    }
+    double sigma2 = sum_sq / n; // Variance estimate
+
+    // Step 7: Compute Gaussian log-likelihood
+    // LL = -n/2 * (ln(2π) + ln(σ²) + 1), where Σ(e_t²)/(2σ²) = n/2
+    double ll = -0.5 * n * (log(2 * M_PI) + log(sigma2) + 1);
+
+    // Step 8: Clean up memory
+    free(diff);
+    free(res);
+    if (theta) free(theta);
+
+    return ll;
 }
 
+/**
+ * @brief Selects optimal ARIMA orders (p, d, q) by minimizing the Akaike Information Criterion (AIC).
+ *
+ * @details
+ * This function performs a grid search over possible ARIMA orders within specified bounds,
+ * computes the AIC for each model using its log-likelihood, and selects the combination with
+ * the lowest AIC. The AIC is computed as:
+ * \f[
+ *   \mathrm{AIC} = -2 \times \mathrm{LL} + 2 \times (p + q + 1)
+ * \f]
+ * where \f$\mathrm{LL}\f$ is the log-likelihood of the fitted model, and \f$(p + q + 1)\f$ 
+ * represents the number of parameters (including the intercept).
+ *
+ * In this version, \f$p\f$, \f$d\f$, and \f$q\f$ are *never allowed to be zero* — only models with
+ * p, d, and q starting from 1 are considered.
+ *
+ * @param series    Pointer to the input time series array.
+ * @param length    Number of observations in the series.
+ * @param maxP      Maximum AR order to test (must be >= 1).
+ * @param maxD      Maximum differencing order to test (must be >= 1).
+ * @param maxQ      Maximum MA order to test (must be >= 1).
+ * @param p_out     Pointer to an integer where the chosen AR order (p) will be stored.
+ * @param d_out     Pointer to an integer where the chosen differencing order (d) will be stored.
+ * @param q_out     Pointer to an integer where the chosen MA order (q) will be stored.
+ */
+void selectOrdersAIC(double *series, int length, int maxP, int maxD, int maxQ,
+                     int *p_out, int *d_out, int *q_out) 
+{
+    // Initialize bestAIC to infinity.
+    double bestAIC = INFINITY;
+
+    // Loop over differencing orders (d) from 1 to maxD.
+    for (int d = 1; d <= maxD; d++) {
+        // Loop over AR orders (p) from 1 to maxP.
+        for (int p = 1; p <= maxP; p++) {
+            // Loop over MA orders (q) from 1 to maxQ.
+            for (int q = 1; q <= maxQ; q++) {
+
+                // Check if the number of parameters exceeds the data length.
+                if (p + d + q + 1 > length) {
+                    continue;
+                }
+
+                // Compute the log-likelihood for the ARIMA(p, d, q) model.
+                double ll = computeARIMALogLikelihood(series, length, p, d, q);
+
+                // Calculate the AIC.
+                double aic = -2.0 * ll + 2.0 * (p + q + 1);
+
+                // Log the current model parameters and AIC.
+                printf("p=%d, d=%d, q=%d: LL=%.4f, AIC=%.4f\n", p, d, q, ll, aic);
+
+                // Update the best model if this AIC is lower.
+                if (aic < bestAIC) {
+                    bestAIC = aic;
+                    *p_out = p;
+                    *d_out = d;
+                    *q_out = q;
+                }
+            }
+        }
+    }
+
+    // Output the best model found.
+    printf("Best AIC=%.4f for p=%d, d=%d, q=%d\n", bestAIC, *p_out, *d_out, *q_out);
+}
 
 /**
  * Detects and adjusts outliers in a time series using Median Absolute Deviation (MAD) for robust preprocessing.
@@ -2128,7 +2220,6 @@ int adjustOutliers(double series[], int length) {
     return outliers;
 }
 
-
 /**
  * @brief Forecasts future values using an ARIMA(p,d,q) model.
  *
@@ -2155,75 +2246,50 @@ int adjustOutliers(double series[], int length) {
  * - **Stationarity Dependence**: Relies on accurate differencing; misjudged \( d \) skews results.
  * - **Short-Term Focus**: Long-horizon forecasts may diverge due to lack of stochastic error modeling.
  *
+ * **Why Updated**: Removed auto-selection logic (previously triggered by -1) to rely on explicit 
+ * orders from `selectOrdersAIC`, improving modularity and consistency.
+ *
  * @param series The input time series.
  * @param seriesLength Length of the series.
- * @param p AR order.
- * @param d Differencing order.
- * @param q MA order.
+ * @param p AR order (must be >= 0).
+ * @param d Differencing order (must be >= 0).
+ * @param q MA order (must be >= 0).
  * @return Pointer to forecast array (length FORECAST_ARRAY_SIZE); caller must free it.
  */
 double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
     DEBUG_PRINT("Entering forecastARIMA: seriesLength=%d, p=%d, d=%d, q=%d\n", seriesLength, p, d, q);
 
-    // Step 1: Auto-select orders if any parameter is -1
-    if (p == -1 || d == -1 || q == -1) {
-        DEBUG_PRINT("Auto-selection triggered: p=%d, d=%d, q=%d\n", p, d, q);
-        int auto_p, auto_q;
-        int maxLag = 10; // Maximum lag for ACF/PACF analysis
-        DEBUG_PRINT("Calling selectOrdersWithFeedback with maxLag=%d\n", maxLag);
-        selectOrdersWithFeedback(series, seriesLength, maxLag, &auto_p, &auto_q);
-        DEBUG_PRINT("Auto-selected p=%d, q=%d from ACF/PACF\n", auto_p, auto_q);
-
-        double tStat, pValue;
-        int auto_d = 0;
-        double *tempSeries = malloc(seriesLength * sizeof(double));
-        copyArray(series, tempSeries, seriesLength);
-        int tempLength = seriesLength;
-        DEBUG_PRINT("Starting ADF test loop for d, initial length=%d\n", tempLength);
-        while (auto_d < 2 && !ADFTestExtendedAutoLag(tempSeries, tempLength, MODEL_CONSTANT_ONLY, &tStat, &pValue)) {
-            DEBUG_PRINT("ADF test failed: tStat=%.4f, pValue=%.4f, auto_d=%d\n", tStat, pValue, auto_d);
-            double *diff = differenceSeries(tempSeries, tempLength, 1);
-            free(tempSeries);
-            tempSeries = diff;
-            tempLength--;
-            auto_d++;
-        }
-        free(tempSeries);
-        DEBUG_PRINT("Auto-selected d=%d after ADF test\n", auto_d);
-
-        p = (p == -1) ? auto_p : p;
-        d = (d == -1) ? auto_d : d;
-        q = (q == -1) ? auto_q : q;
-        DEBUG_PRINT("Final orders after auto-selection: p=%d, d=%d, q=%d\n", p, d, q);
-        printf("Auto-selected orders: p=%d, d=%d, q=%d\n", p, d, q);
-    }
-
-    // Step 2: Validate data sufficiency
+    // Step 1: Validate data sufficiency and input parameters
+    // Why: Ensures the series is long enough for the specified model and orders are non-negative.
     DEBUG_PRINT("Validating data sufficiency: seriesLength=%d, p+d+q+1=%d\n", seriesLength, p + d + q + 1);
+    if (p < 0 || d < 0 || q < 0) {
+        fprintf(stderr, "Error: ARIMA orders must be non-negative (p=%d, d=%d, q=%d).\n", p, d, q);
+        exit(EXIT_FAILURE);
+    }
     if (seriesLength < p + d + q + 1) {
         fprintf(stderr, "Error: Insufficient data for ARIMA(%d,%d,%d). Need %d points, got %d.\n",
                 p, d, q, p + d + q + 1, seriesLength);
         exit(EXIT_FAILURE);
     }
 
-    // Step 3: Difference series to achieve stationarity
+    // Step 2: Difference series to achieve stationarity
     int currentLength = seriesLength;
     DEBUG_PRINT("Differencing series: d=%d, initial length=%d\n", d, currentLength);
-    double *currentSeries = ensureStationary(series, &currentLength, d);
+    double *currentSeries = ensureStationary(series, & currentLength, d);
     DEBUG_PRINT("After differencing: currentLength=%d\n", currentLength);
     if (p > currentLength / 2) {
         DEBUG_PRINT("Capping p: original p=%d, new p=%d (half currentLength)\n", p, currentLength / 2);
         p = currentLength / 2;
     }
 
-    // Step 4: Estimate AR parameters if p > 0
+    // Step 3: Estimate AR parameters if p > 0
     double *arEstimates = NULL;
     if (p > 0 && currentLength > p) {
         //DEBUG_PRINT("Estimating AR parameters: p=%d, length=%d\n", p, currentLength);
         arEstimates = malloc((p + 1) * sizeof(double));
         if (!arEstimates) { free(currentSeries); exit(EXIT_FAILURE); }
         estimateARWithCMLE(currentSeries, currentLength, p, arEstimates);
-        // DEBUG_PRINT("AR estimates: ");
+        //DEBUG_PRINT("AR estimates: ");
         for (int i = 0; i < p; i++) DEBUG_PRINT("phi[%d]=%.4f, ", i, arEstimates[i]);
         DEBUG_PRINT("mu=%.4f\n", arEstimates[p]);
         if (!checkRoots(arEstimates, p, 1)) {
@@ -2238,7 +2304,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         DEBUG_PRINT("Skipping AR estimation: p=%d, length=%d\n", p, currentLength);
     }
 
-    // Step 5: Compute residuals for MA estimation
+    // Step 4: Compute residuals for MA estimation
     double *arResiduals = NULL;
     if (q > 0 && p > 0 && currentLength > p) {
         //DEBUG_PRINT("Computing AR residuals: length=%d, p=%d\n", currentLength, p);
@@ -2257,7 +2323,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         copyArray(currentSeries, arResiduals, currentLength);
     }
 
-    // Step 6: Estimate MA parameters if q > 0
+    // Step 5: Estimate MA parameters if q > 0
     double *maEstimates = NULL;
     if (q > 0 && arResiduals && currentLength - p > q) {
         DEBUG_PRINT("Estimating MA parameters: q=%d, residual length=%d\n", q, currentLength - p);
@@ -2269,9 +2335,15 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         DEBUG_PRINT("Skipping MA estimation: q=%d, residuals available=%s\n", q, arResiduals ? "yes" : "no");
     }
 
-    // Step 7: Allocate forecast array and initialize past errors
+    // Step 6: Allocate forecast array and initialize past errors
     double *forecast = malloc(sizeof(double) * FORECAST_ARRAY_SIZE);
-    if (!forecast) { free(currentSeries); if (arEstimates) free(arEstimates); if (maEstimates) free(maEstimates); if (arResiduals) free(arResiduals); exit(EXIT_FAILURE); }
+    if (!forecast) { 
+        free(currentSeries); 
+        if (arEstimates) free(arEstimates); 
+        if (maEstimates) free(maEstimates); 
+        if (arResiduals) free(arResiduals); 
+        exit(EXIT_FAILURE); 
+    }
     double pastErrors[q];
     memset(pastErrors, 0, q * sizeof(double));
     if (q > 0 && arResiduals) {
@@ -2282,14 +2354,14 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         }
     }
 
-    // Step 8: Compute one-step forecast
+    // Step 7: Compute one-step forecast
     double oneStep = arEstimates ? arEstimates[p] : 0.0;
     if (p > 0) {
         for (int j = 0; j < p; j++) oneStep += arEstimates[j] * currentSeries[currentLength - j - 1];
         //DEBUG_PRINT("AR contribution to one-step: %.4f\n", oneStep);
     } else {
         oneStep = currentSeries[currentLength - 1];
-       //DEBUG_PRINT("No AR, using last value: %.4f\n", oneStep);
+        //DEBUG_PRINT("No AR, using last value: %.4f\n", oneStep);
     }
     if (q > 0 && maEstimates) {
         for (int j = 0; j < q; j++) oneStep += maEstimates[j] * pastErrors[j];
@@ -2298,7 +2370,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
     forecast[0] = oneStep;
     //DEBUG_PRINT("One-step forecast: %.4f\n", forecast[0]);
 
-    // Step 9: Generate multi-step forecasts recursively
+    // Step 8: Generate multi-step forecasts recursively
     DEBUG_PRINT("Generating multi-step forecasts up to horizon=%d\n", FORECAST_HORIZON);
     for (int h = 1; h < FORECAST_HORIZON; h++) {
         double f = arEstimates ? arEstimates[p] : 0.0;
@@ -2316,7 +2388,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         DEBUG_PRINT("Forecast at step %d: %.4f\n", h, forecast[h]);
     }
 
-    // Step 10: Compute forecast variance
+    // Step 9: Compute forecast variance
     //DEBUG_PRINT("Computing forecast variance\n");
     double psi[p + q];
     memset(psi, 0, sizeof(psi));
@@ -2338,7 +2410,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
     }
     forecast[FORECAST_HORIZON + 1] = var;
 
-    // Step 11: Integrate forecasts if differenced
+    // Step 10: Integrate forecasts if differenced
     if (d > 0) {
         double recoveryValue = series[seriesLength - 1];
         DEBUG_PRINT("Integrating forecasts: d=%d, recoveryValue=%.4f\n", d, recoveryValue);
@@ -2350,7 +2422,7 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
         DEBUG_PRINT("\n");
     }
 
-    // Step 12: Clean up and return
+    // Step 11: Clean up and return
     DEBUG_PRINT("Cleaning up and returning forecast\n");
     free(currentSeries);
     if (arEstimates) free(arEstimates);
@@ -2441,7 +2513,7 @@ double computeLjungBox(const double residuals[], int length, int maxLag) {
     return Q;
 }
 
-#define SERIES_LENGTH 175         // Length of sampleData subset for forecasting
+#define SERIES_LENGTH 166       // Length of sampleData subset for forecasting
 #define DEFAULT_AR_ORDER 2        // Default AR order for diagnostics
 #define DEFAULT_DIFF_ORDER 1      // Default differencing order
 #define DEFAULT_MA_ORDER 4        // Default MA order for diagnostics
@@ -2456,6 +2528,20 @@ double* preprocessSeries(double *series, int length) {
     return adjusted;
 }
 
+/**
+ * @brief Computes an ARIMA forecast with specified orders.
+ *
+ * @details
+ * A wrapper function that calls `forecastARIMA` with explicit p, d, q values, assuming orders
+ * are pre-determined (e.g., via `selectOrdersAIC`). Returns the forecast array for use in diagnostics.
+ *
+ * @param series Input time series.
+ * @param length Length of the series.
+ * @param p AR order.
+ * @param d Differencing order.
+ * @param q MA order.
+ * @return Pointer to forecast array (FORECAST_ARRAY_SIZE); caller must free it.
+ */
 double* computeForecast(double *series, int length, int p, int d, int q) {
     return forecastARIMA(series, length, p, d, q);
 }
@@ -2547,18 +2633,25 @@ void computeDiagnostics(double *series, int length, double *forecast, int p, int
 
 /*==================== Main Function ====================*/
 int main(void) {
-    
     double sampleData[] = {10.544653, 10.688583, 10.666841, 10.662732, 10.535033, 10.612065, 10.577628, 10.524487, 10.511290, 10.520899, 10.605484, 10.506456, 10.693456, 10.667562, 10.640863, 10.553473, 10.684760, 10.752397, 10.671068, 10.667091, 10.641893, 10.625706, 10.701795, 10.607544, 10.689169, 10.695256, 10.717050, 10.677475, 10.691141, 10.730298, 10.732664, 10.710082, 10.713123, 10.759815, 10.696599, 10.663845, 10.716597, 10.780855, 10.795759, 10.802620, 10.720496, 10.753401, 10.709436, 10.746909, 10.737377, 10.754609, 10.765248, 10.692602, 10.837926, 10.755324, 10.756213, 10.843190, 10.862529, 10.751269, 10.902390, 10.817731, 10.859796, 10.887362, 10.835401, 10.824412, 10.860767, 10.819504, 10.907496, 10.831528, 10.821727, 10.830010, 10.915317, 10.858694, 10.921139, 10.927524, 10.894352, 10.889785, 10.956356, 10.938758, 11.093567, 10.844841, 11.094493, 11.035941, 10.982765, 11.071057, 10.996308, 11.099276, 11.142057, 11.137176, 11.157537, 11.007247, 11.144075, 11.183029, 11.172096, 11.164571, 11.192833, 11.227109, 11.141589, 11.311490, 11.239783, 11.295933, 11.199566, 11.232262, 11.333208, 11.337874, 11.322334, 11.288216, 11.280459, 11.247973, 11.288277, 11.415095, 11.297583, 11.360763, 11.288338, 11.434631, 11.456051, 11.578981, 11.419166, 11.478404, 11.660141, 11.544303, 11.652028, 11.638368, 11.651792, 11.621518, 11.763853, 11.760687, 11.771138, 11.678104, 11.783163, 11.932094, 11.948678, 11.962627, 11.937934, 12.077570, 11.981595, 12.096366, 12.032683, 12.094221, 11.979764, 12.217793, 12.235930, 12.129859, 12.411867, 12.396301, 12.413920, 12.445867, 12.480462, 12.470674, 12.537774, 12.562252, 12.810248, 12.733546, 12.861890, 12.918012, 13.033087, 13.245610, 13.184196, 13.414342, 13.611838, 13.626345, 13.715446, 13.851129, 14.113374, 14.588537, 14.653982, 15.250756, 15.618371, 16.459558, 18.144264, 23.523062, 40.229511, 38.351265, 38.085281, 37.500885, 37.153946, 36.893066, 36.705956, 36.559536, 35.938847, 36.391586, 36.194046, 36.391586, 36.119102, 35.560543, 35.599018, 34.958851, 35.393860, 34.904797, 35.401318, 34.863518, 34.046680, 34.508522, 34.043182, 34.704235, 33.556644, 33.888481, 33.533638, 33.452129, 32.930935, 32.669731, 32.772537, 32.805634, 32.246761, 32.075809, 31.864927, 31.878294, 32.241131, 31.965626, 31.553604, 30.843288, 30.784569, 31.436094, 31.170496, 30.552132, 30.500242, 30.167421, 29.911989, 29.586046, 29.478958, 29.718994, 29.611095, 29.557945, 28.463432, 29.341291, 28.821512, 28.447210, 27.861872, 27.855633, 27.910660, 28.425800, 27.715517, 27.617193, 27.093372, 26.968832, 26.977205, 27.170172, 26.251677, 26.633236, 26.224941, 25.874708, 25.593761, 26.392395, 24.904768, 25.331600, 24.530737, 25.074808, 25.310865, 24.337013, 24.442986, 24.500193, 24.130409, 24.062714, 24.064592, 23.533037, 23.977909, 22.924667, 22.806379, 23.130791, 22.527645, 22.570505, 22.932512, 22.486126, 22.594856, 22.383926, 22.115181, 22.105082, 21.151754, 21.074114, 21.240192, 20.977468, 20.771507, 21.184586, 20.495111, 20.650751, 20.656075, 20.433039, 20.005697, 20.216360, 19.982117, 19.703951, 19.572884, 19.332155, 19.544645, 18.666328, 19.219872, 18.934229, 19.186989, 18.694986, 18.096903, 18.298306, 17.704309, 18.023785, 18.224157, 18.182484, 17.642824, 17.739542, 17.474176, 17.270575, 17.604120, 17.631210, 16.639175, 17.107626, 17.024216, 16.852285, 16.780111, 16.838861, 16.539309, 16.092861, 16.131529, 16.221350, 16.087164, 15.821659, 15.695448, 15.693087, 16.047991, 15.682863, 15.724131, 15.263708, 15.638486, 15.443835, 15.602257, 15.122874, 14.918172, 14.968882, 14.843689, 14.861169, 15.052527, 15.056897, 14.690192, 14.686479, 14.567565, 14.365212, 14.253309, 14.289158, 14.227124, 14.069589, 14.074703, 13.869432, 13.861959, 13.782178, 13.882711, 13.908362, 13.727641, 13.600214, 13.594969, 13.535290, 13.602018, 13.502626, 13.579159, 13.207825, 13.426789, 13.178141, 13.286413, 12.958746, 13.189507, 13.079733, 13.138372, 12.986096, 12.854589, 12.858962, 12.903029, 12.852099, 12.644394, 12.558786, 12.636994};
-
     int dataLength = sizeof(sampleData) / sizeof(sampleData[0]);
 
+    // Step 1: Preprocess the series
     double *adjustedSeries = preprocessSeries(sampleData, dataLength);
-    double *forecast = computeForecast(adjustedSeries, SERIES_LENGTH, -1, -1, -1);
-    computeDiagnostics(adjustedSeries, dataLength, forecast, DEFAULT_AR_ORDER, DEFAULT_DIFF_ORDER, DEFAULT_MA_ORDER);
 
+    // Step 2: Select optimal ARIMA orders using AIC
+    int p, d, q;
+    selectOrdersAIC(adjustedSeries, SERIES_LENGTH, 12, 1, 12, &p, &d, &q); // Search up to p=3, d=2, q=3
+    printf("AIC-selected orders: p=%d, d=%d, q=%d\n", p, d, q);
+
+    // Step 3: Compute forecast with optimal orders
+    double *forecast = computeForecast(adjustedSeries, SERIES_LENGTH, p, d, q);
+
+    // Step 4: Compute diagnostics with the same orders
+    computeDiagnostics(adjustedSeries, dataLength, forecast, p, d, q);
+
+    // Step 5: Clean up
     free(adjustedSeries);
     free(forecast);
     return 0;
-    return 0;
 }
-
