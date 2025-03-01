@@ -405,50 +405,60 @@ void matrixMultiply(int rowsA, int colsA, int colsB, double A[][colsA], double B
 void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int block_size) {
     int i, j, k, nb;
     
+    // Allocate arrays for initial and updated column norms
     double *norms = malloc(n * sizeof(double));
     double *norms_updated = malloc(n * sizeof(double));
     if (!norms || !norms_updated) {
         fprintf(stderr, "Memory allocation error in qr_decomp_colpivot_blocked.\n");
         exit(EXIT_FAILURE);
     }
-    
-    // Compute initial column norms.
+    DEBUG_PRINT("Allocated norms arrays: m=%d, n=%d, block_size=%d\n", m, n, block_size);
+
+    // Compute initial column norms
+    // Why: Establishes baseline for pivoting decisions
     for (j = 0; j < n; j++) {
-        jpvt[j] = j;
+        jpvt[j] = j; // Initialize pivot array as identity
         double sum = 0.0;
         for (i = 0; i < m; i++) {
             double aij = A[IDX(i, j, lda)];
-            sum += aij * aij;
+            sum += aij * aij; // Sum of squares for column j
         }
-        norms[j] = sqrt(sum);
+        norms[j] = sqrt(sum); // 2-norm of column j
         norms_updated[j] = norms[j];
         if (norms[j] < SINGULARITY_THRESHOLD) {
             fprintf(stderr, "Warning: Column %d is nearly singular (norm = %e).\n", j, norms[j]);
-            // Optionally, you can set the norm to the threshold to avoid division by nearly zero.
-            norms[j] = SINGULARITY_THRESHOLD;
+            norms[j] = SINGULARITY_THRESHOLD; // Prevent division issues
             norms_updated[j] = SINGULARITY_THRESHOLD;
         }
+        DEBUG_PRINT("Initial norm for col %d: %.4e\n", j, norms[j]);
     }
     
-    // Main factorization loop.
+    // Main factorization loop over columns
+    // Why: Iteratively builds Q and R while pivoting for stability
     for (k = 0; k < n && k < m; k++) {
-        // Column pivoting: find the column with the maximum updated norm.
+        DEBUG_PRINT("Processing column k=%d\n", k);
+
+        // Step 1: Column pivoting
+        // Why: Moves largest norm column to pivot position for stability
         int max_index = k;
         for (j = k; j < n; j++) {
-            if (norms_updated[j] > norms_updated[max_index])
-                max_index = j;
+            if (norms_updated[j] > norms_updated[max_index]) {
+                max_index = j; // Find column with max updated norm
+            }
         }
         if (max_index != k) {
-            // Swap columns k and max_index.
+            DEBUG_PRINT("Pivoting: swapping col %d with col %d\n", k, max_index);
+            // Swap columns k and max_index in A
             for (i = 0; i < m; i++) {
                 double tmp = A[IDX(i, k, lda)];
                 A[IDX(i, k, lda)] = A[IDX(i, max_index, lda)];
                 A[IDX(i, max_index, lda)] = tmp;
             }
+            // Update pivot array
             int tmp_int = jpvt[k];
             jpvt[k] = jpvt[max_index];
             jpvt[max_index] = tmp_int;
-            
+            // Swap norms
             double tmp_norm = norms_updated[k];
             norms_updated[k] = norms_updated[max_index];
             norms_updated[max_index] = tmp_norm;
@@ -456,64 +466,75 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             norms[k] = norms[max_index];
             norms[max_index] = tmp_norm;
         }
+        DEBUG_PRINT("After pivot: jpvt[%d]=%d, norm=%.4e\n", k, jpvt[k], norms[k]);
         
-        // Compute the 2–norm of the k–th column from row k onward.
+        // Step 2: Compute the 2-norm of the k-th column from row k onward
+        // Why: Determines magnitude for Householder reflector
         double norm_x = 0.0;
         for (i = k; i < m; i++) {
             norm_x += A[IDX(i, k, lda)] * A[IDX(i, k, lda)];
         }
         norm_x = sqrt(norm_x);
+        DEBUG_PRINT("Column %d norm_x from row %d: %.4e\n", k, k, norm_x);
         
-        // Robust handling: if the pivot norm is nearly zero, warn and set pivot to zero.
+        // Step 3: Handle near-singular pivot
+        // Why: Prevents breakdown if column is effectively zero
         if (norm_x < SINGULARITY_THRESHOLD) {
             fprintf(stderr, "Warning: Nearly singular pivot encountered at column %d (norm = %e). Setting pivot to zero.\n", k, norm_x);
             A[IDX(k, k, lda)] = 0.0;
-            continue;  // Skip reflector computation for this column.
+            continue; // Skip reflector for this column
         }
         
-        double sign = (A[IDX(k, k, lda)] >= 0) ? -1.0 : 1.0;
+        // Step 4: Compute Householder reflector
+        // Why: Zeros out subdiagonal elements in column k
+        double sign = (A[IDX(k, k, lda)] >= 0) ? -1.0 : 1.0; // Choose sign to avoid cancellation
         double *v = malloc((m - k) * sizeof(double));
         if (!v) {
             fprintf(stderr, "Memory allocation error in qr_decomp_colpivot_blocked (v).\n");
             exit(EXIT_FAILURE);
         }
-        v[0] = A[IDX(k, k, lda)] - sign * norm_x;
+        v[0] = A[IDX(k, k, lda)] - sign * norm_x; // First element of reflector
         for (i = k + 1; i < m; i++) {
-            v[i - k] = A[IDX(i, k, lda)];
+            v[i - k] = A[IDX(i, k, lda)]; // Copy remaining elements
         }
         double norm_v = 0.0;
         for (i = 0; i < m - k; i++) {
-            norm_v += v[i] * v[i];
+            norm_v += v[i] * v[i]; // Compute norm of v
         }
         norm_v = sqrt(norm_v);
+        DEBUG_PRINT("Householder vector norm_v: %.4e\n", norm_v);
         if (norm_v < SINGULARITY_THRESHOLD) {
             fprintf(stderr, "Warning: Householder vector nearly zero at column %d.\n", k);
             free(v);
-            continue;
-        }
-        // Normalize the Householder vector.
-        for (i = 0; i < m - k; i++) {
-            v[i] /= norm_v;
-        }
-        // Store the reflector.
-        A[IDX(k, k, lda)] = sign * norm_x;
-        for (i = k + 1; i < m; i++) {
-            A[IDX(i, k, lda)] = v[i - k];
+            continue; // Skip if reflector is trivial
         }
         
-        // Blocked update of trailing columns.
-        nb = ((k + block_size) < n) ? block_size : (n - k);
+        // Step 5: Normalize and store the reflector
+        // Why: Prepares v for orthogonal update and stores it in A
+        for (i = 0; i < m - k; i++) {
+            v[i] /= norm_v; // Normalize v
+        }
+        A[IDX(k, k, lda)] = sign * norm_x; // Store pivot value
+        for (i = k + 1; i < m; i++) {
+            A[IDX(i, k, lda)] = v[i - k]; // Store reflector below diagonal
+        }
+        DEBUG_PRINT("Stored reflector for col %d: A[%d,%d]=%.4e\n", k, k, k, A[IDX(k, k, lda)]);
+        
+        // Step 6: Blocked update of trailing columns
+        // Why: Applies reflector to remaining columns efficiently
+        nb = ((k + block_size) < n) ? block_size : (n - k); // Adjust block size if needed
+        DEBUG_PRINT("Updating block: k=%d, nb=%d\n", k, nb);
         for (j = k + 1; j < k + nb; j++) {
             double dot = 0.0;
             for (i = k; i < m; i++) {
-                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
-                dot += vi * A[IDX(i, j, lda)];
+                double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)]; // Implicit 1 for v[0]
+                dot += vi * A[IDX(i, j, lda)]; // v^T * A_j
             }
             for (i = k; i < m; i++) {
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
-                A[IDX(i, j, lda)] -= 2 * vi * dot;
+                A[IDX(i, j, lda)] -= 2 * vi * dot; // A_j = A_j - 2 * v * (v^T A_j)
             }
-            // Reorthogonalization pass to improve stability.
+            // Reorthogonalization pass
             dot = 0.0;
             for (i = k; i < m; i++) {
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
@@ -521,22 +542,21 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             }
             for (i = k; i < m; i++) {
                 double vi = (i == k) ? 1.0 : A[IDX(i, k, lda)];
-                A[IDX(i, j, lda)] -= 2 * vi * dot;
+                A[IDX(i, j, lda)] -= 2 * vi * dot; // Second pass for stability
             }
-            // Update the norm.
+            // Update norm
             double new_norm_sq = 0.0;
-            for (i = k+1; i < m; i++) {
+            for (i = k + 1; i < m; i++) {
                 new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
             }
             double new_norm = sqrt(new_norm_sq);
-            // If the new norm is very small, warn and set it to zero.
             if (new_norm < 0.1 * norms[j]) {
                 if (new_norm < SINGULARITY_THRESHOLD) {
                     fprintf(stderr, "Warning: Updated norm for column %d is nearly singular (new_norm = %e).\n", j, new_norm);
                     new_norm = 0.0;
                 } else {
                     new_norm_sq = 0.0;
-                    for (i = k+1; i < m; i++) {
+                    for (i = k + 1; i < m; i++) {
                         new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
                     }
                     new_norm = sqrt(new_norm_sq);
@@ -544,7 +564,9 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             }
             norms_updated[j] = new_norm;
             norms[j] = new_norm;
+            DEBUG_PRINT("Updated norm for col %d: %.4e\n", j, new_norm);
         }
+        // Non-blocked update for remaining columns
         for (j = k + nb; j < n; j++) {
             double dot = 0.0;
             for (i = k; i < m; i++) {
@@ -565,7 +587,7 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
                 A[IDX(i, j, lda)] -= 2 * vi * dot;
             }
             double new_norm_sq = 0.0;
-            for (i = k+1; i < m; i++) {
+            for (i = k + 1; i < m; i++) {
                 new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
             }
             double new_norm = sqrt(new_norm_sq);
@@ -575,7 +597,7 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
                     new_norm = 0.0;
                 } else {
                     new_norm_sq = 0.0;
-                    for (i = k+1; i < m; i++) {
+                    for (i = k + 1; i < m; i++) {
                         new_norm_sq += A[IDX(i, j, lda)] * A[IDX(i, j, lda)];
                     }
                     new_norm = sqrt(new_norm_sq);
@@ -583,11 +605,15 @@ void qr_decomp_colpivot_blocked(int m, int n, double *A, int lda, int *jpvt, int
             }
             norms_updated[j] = new_norm;
             norms[j] = new_norm;
+            DEBUG_PRINT("Updated norm for col %d (non-block): %.4e\n", j, new_norm);
         }
         free(v);
     }
+    // Step 7: Clean up
+    // Why: Releases temporary memory
     free(norms);
     free(norms_updated);
+    DEBUG_PRINT("Completed QR decomposition\n");
 }
 
 /**
@@ -1826,72 +1852,111 @@ void estimateARWithCMLE(double series[], int length, int p, double phi[]) {
 double *estimateMAWithMLE(double residuals[], int length, int q) {
     // Allocate theta array (q coefficients + intercept)
     double *theta = malloc((q + 1) * sizeof(double));
-    if (!theta) return NULL;
+    if (!theta) {
+        fprintf(stderr, "Memory allocation failed for theta in estimateMAWithMLE.\n");
+        return NULL;
+    }
 
     // Step 1: Set initial guesses
-    initialMAFromACF(residuals, length, q, theta);
-    theta[q] = calculateMean(residuals, length); // Intercept as mean
+    // Why: Provides a starting point for optimization using ACF-based estimates
+    initialMAFromACF(residuals, length, q, theta); // θ_j = 0.5 * ACF(lag j+1)
+    theta[q] = calculateMean(residuals, length);   // Initial intercept μ = mean(residuals)
+    // Note: Scaling by 0.5 dampens ACF values to avoid unstable starting points
 
-    // Step 2: Newton-Raphson optimization
+    // Step 2: Newton-Raphson optimization loop
+    // Why: Iteratively refines θ to minimize negative log-likelihood
     for (int iter = 0; iter < MAX_NEWTON_ITER; iter++) {
+        // Initialize gradient and Hessian arrays
         double grad[q + 1];
         double hess[q + 1][q + 1];
         memset(grad, 0, (q + 1) * sizeof(double));
         memset(hess, 0, (q + 1) * (q + 1) * sizeof(double));
         double *errors = calloc(length, sizeof(double));
-        if (!errors) { free(theta); return NULL; }
+        if (!errors) {
+            fprintf(stderr, "Memory allocation failed for errors in estimateMAWithMLE.\n");
+            free(theta);
+            return NULL;
+        }
 
-        // Compute errors and gradient/Hessian
+        // Step 2.1: Compute errors and build gradient/Hessian
+        // Why: Gradient and Hessian drive the Newton-Raphson update
         for (int t = q; t < length; t++) {
-            double pred = theta[q];
-            for (int j = 0; j < q && t - j - 1 >= 0; j++) pred += theta[j] * errors[t - j - 1];
-            errors[t] = residuals[t] - pred;
-            // Gradient: partial derivatives of -log L w.r.t. theta
+            double pred = theta[q]; // Prediction starts with intercept μ
+            for (int j = 0; j < q && t - j - 1 >= 0; j++) {
+                pred += theta[j] * errors[t - j - 1]; // Add MA terms: Σθ_j ε_{t-j}
+            }
+            errors[t] = residuals[t] - pred; // ε_t = residual_t - (μ + Σθ_j ε_{t-j})
+            // Gradient computation for coefficients
             for (int i = 0; i < q; i++) {
                 if (t - i - 1 >= 0) {
-                    grad[i] += -errors[t] * errors[t - i - 1]; // \( \frac{\partial}{\partial \theta_i} = -\sum \epsilon_t \epsilon_{t-i} \)
+                    grad[i] += -errors[t] * errors[t - i - 1]; // ∂(-logL)/∂θ_i = -Σε_t ε_{t-i-1}
+                    // Hessian approximation for coefficients
                     for (int j = 0; j <= i; j++) {
                         if (t - j - 1 >= 0) {
-                            hess[i][j] += errors[t - i - 1] * errors[t - j - 1]; // Approximate Hessian
-                            hess[j][i] = hess[i][j];
+                            hess[i][j] += errors[t - i - 1] * errors[t - j - 1]; // H_ij ≈ Σε_{t-i-1} ε_{t-j-1}
+                            hess[j][i] = hess[i][j]; // Symmetry: H_ji = H_ij
                         }
                     }
                 }
             }
-            grad[q] += -errors[t]; // Intercept gradient
-            hess[q][q] += 1.0; // Hessian for intercept (simplified)
+            grad[q] += -errors[t]; // ∂(-logL)/∂μ = -Σε_t (intercept gradient)
+            hess[q][q] += 1.0;    // ∂²(-logL)/∂μ² ≈ 1 (simplified constant for intercept)
         }
 
-        // Step 3: Solve for update direction: H * delta = -grad
+        // Step 3: Solve for update direction
+        // Why: Computes Δθ = H^(-1) * (-g) to adjust parameters
         double grad_mat[q + 1][1];
-        for (int i = 0; i < q + 1; i++) grad_mat[i][0] = grad[i];
-        double *delta = performMultivariateLinearRegression(q + 1, q + 1, hess, grad_mat);
-        if (!delta) { free(errors); free(theta); return NULL; }
+        for (int i = 0; i < q + 1; i++) {
+            grad_mat[i][0] = grad[i]; // Convert gradient to matrix form for regression
+        }
+        double *delta = performMultivariateLinearRegression(q + 1, q + 1, hess, grad_mat); // Solve H * Δθ = g
+        if (!delta) {
+            fprintf(stderr, "Failed to compute update direction in estimateMAWithMLE.\n");
+            free(errors);
+            free(theta);
+            return NULL;
+        }
 
         // Step 4: Line search to ensure likelihood improves
-        double step_size = 1.0;
-        double old_nll = computeMANegLogLikelihood(theta, residuals, length, q);
+        // Why: Prevents overshooting by adjusting step size
+        double step_size = 1.0; // Initial step size
+        double old_nll = computeMANegLogLikelihood(theta, residuals, length, q); // Current likelihood
         double new_theta[q + 1];
-        for (int i = 0; i < q + 1; i++) new_theta[i] = theta[i] - step_size * delta[i];
-        double new_nll = computeMANegLogLikelihood(new_theta, residuals, length, q);
+        for (int i = 0; i < q + 1; i++) {
+            new_theta[i] = theta[i] - step_size * delta[i]; // Tentative update: θ_new = θ - step * Δθ
+        }
+        double new_nll = computeMANegLogLikelihood(new_theta, residuals, length, q); // New likelihood
         while (new_nll > old_nll && step_size > NEWTON_TOL) {
-            step_size *= 0.5;
-            for (int i = 0; i < q + 1; i++) new_theta[i] = theta[i] - step_size * delta[i];
+            step_size *= 0.5; // Halve step size if likelihood increases
+            for (int i = 0; i < q + 1; i++) {
+                new_theta[i] = theta[i] - step_size * delta[i]; // Retry with smaller step
+            }
             new_nll = computeMANegLogLikelihood(new_theta, residuals, length, q);
         }
 
-        // Step 5: Update theta
+        // Step 5: Update theta with the successful step
+        // Why: Applies the refined update to improve the estimate
         memcpy(theta, new_theta, (q + 1) * sizeof(double));
         free(delta);
         free(errors);
-        if (step_size < NEWTON_TOL) break; // Converged
+        if (step_size < NEWTON_TOL) {
+            // Step 5.1: Early exit if convergence achieved
+            // Why: Step size below tolerance indicates negligible improvement
+            break;
+        }
     }
 
     // Step 6: Check invertibility and adjust
+    // Why: Ensures MA process is invertible (roots outside unit circle) for stability
     if (!checkRoots(theta, q, 0)) {
         fprintf(stderr, "Adjusting MA coefficients for invertibility.\n");
-        for (int i = 0; i < q; i++) theta[i] *= 0.95;
+        for (int i = 0; i < q; i++) {
+            theta[i] *= 0.95; // Scale coefficients to push roots outside unit circle
+        }
     }
+
+    // Step 7: Return the final estimates
+    // Note: Caller must free the returned pointer
     return theta;
 }
 
@@ -2098,33 +2163,43 @@ int adjustOutliers(double series[], int length) {
  * @return Pointer to forecast array (length FORECAST_ARRAY_SIZE); caller must free it.
  */
 double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
+    DEBUG_PRINT("Entering forecastARIMA: seriesLength=%d, p=%d, d=%d, q=%d\n", seriesLength, p, d, q);
+
     // Step 1: Auto-select orders if any parameter is -1
-    // Why: Allows flexible, data-driven model specification
     if (p == -1 || d == -1 || q == -1) {
+        DEBUG_PRINT("Auto-selection triggered: p=%d, d=%d, q=%d\n", p, d, q);
         int auto_p, auto_q;
         int maxLag = 10; // Maximum lag for ACF/PACF analysis
-        selectOrdersWithFeedback(series, seriesLength, maxLag, &auto_p, &auto_q); // Estimate p, q
+        DEBUG_PRINT("Calling selectOrdersWithFeedback with maxLag=%d\n", maxLag);
+        selectOrdersWithFeedback(series, seriesLength, maxLag, &auto_p, &auto_q);
+        DEBUG_PRINT("Auto-selected p=%d, q=%d from ACF/PACF\n", auto_p, auto_q);
+
         double tStat, pValue;
         int auto_d = 0;
         double *tempSeries = malloc(seriesLength * sizeof(double));
         copyArray(series, tempSeries, seriesLength);
         int tempLength = seriesLength;
+        DEBUG_PRINT("Starting ADF test loop for d, initial length=%d\n", tempLength);
         while (auto_d < 2 && !ADFTestExtendedAutoLag(tempSeries, tempLength, MODEL_CONSTANT_ONLY, &tStat, &pValue)) {
-            double *diff = differenceSeries(tempSeries, tempLength, 1); // y_t' = y_t - y_{t-1}
+            DEBUG_PRINT("ADF test failed: tStat=%.4f, pValue=%.4f, auto_d=%d\n", tStat, pValue, auto_d);
+            double *diff = differenceSeries(tempSeries, tempLength, 1);
             free(tempSeries);
             tempSeries = diff;
             tempLength--;
             auto_d++;
         }
         free(tempSeries);
+        DEBUG_PRINT("Auto-selected d=%d after ADF test\n", auto_d);
+
         p = (p == -1) ? auto_p : p;
         d = (d == -1) ? auto_d : d;
         q = (q == -1) ? auto_q : q;
+        DEBUG_PRINT("Final orders after auto-selection: p=%d, d=%d, q=%d\n", p, d, q);
         printf("Auto-selected orders: p=%d, d=%d, q=%d\n", p, d, q);
     }
 
     // Step 2: Validate data sufficiency
-    // Why: Ensures enough data for ARIMA(p,d,q) model
+    DEBUG_PRINT("Validating data sufficiency: seriesLength=%d, p+d+q+1=%d\n", seriesLength, p + d + q + 1);
     if (seriesLength < p + d + q + 1) {
         fprintf(stderr, "Error: Insufficient data for ARIMA(%d,%d,%d). Need %d points, got %d.\n",
                 p, d, q, p + d + q + 1, seriesLength);
@@ -2133,41 +2208,65 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
 
     // Step 3: Difference series to achieve stationarity
     int currentLength = seriesLength;
-    double *currentSeries = ensureStationary(series, &currentLength, d); // Apply d differences
-    if (p > currentLength / 2) p = currentLength / 2; // Cap p to avoid overfitting
+    DEBUG_PRINT("Differencing series: d=%d, initial length=%d\n", d, currentLength);
+    double *currentSeries = ensureStationary(series, &currentLength, d);
+    DEBUG_PRINT("After differencing: currentLength=%d\n", currentLength);
+    if (p > currentLength / 2) {
+        DEBUG_PRINT("Capping p: original p=%d, new p=%d (half currentLength)\n", p, currentLength / 2);
+        p = currentLength / 2;
+    }
 
     // Step 4: Estimate AR parameters if p > 0
     double *arEstimates = NULL;
     if (p > 0 && currentLength > p) {
+        //DEBUG_PRINT("Estimating AR parameters: p=%d, length=%d\n", p, currentLength);
         arEstimates = malloc((p + 1) * sizeof(double));
         if (!arEstimates) { free(currentSeries); exit(EXIT_FAILURE); }
-        estimateARWithCMLE(currentSeries, currentLength, p, arEstimates); // Fit AR(p) via CMLE
-        if (!checkRoots(arEstimates, p, 1)) { // Ensure stationarity
+        estimateARWithCMLE(currentSeries, currentLength, p, arEstimates);
+        // DEBUG_PRINT("AR estimates: ");
+        for (int i = 0; i < p; i++) DEBUG_PRINT("phi[%d]=%.4f, ", i, arEstimates[i]);
+        DEBUG_PRINT("mu=%.4f\n", arEstimates[p]);
+        if (!checkRoots(arEstimates, p, 1)) {
+            DEBUG_PRINT("Adjusting AR coefficients for stationarity\n");
             fprintf(stderr, "Warning: AR coefficients adjusted.\n");
-            for (int i = 0; i < p; i++) arEstimates[i] *= 0.95; // Scale down if roots ≤ 1
+            for (int i = 0; i < p; i++) arEstimates[i] *= 0.95;
+            DEBUG_PRINT("Adjusted AR estimates: ");
+            for (int i = 0; i < p; i++) DEBUG_PRINT("phi[%d]=%.4f, ", i, arEstimates[i]);
+            DEBUG_PRINT("mu=%.4f\n", arEstimates[p]);
         }
+    } else {
+        DEBUG_PRINT("Skipping AR estimation: p=%d, length=%d\n", p, currentLength);
     }
 
     // Step 5: Compute residuals for MA estimation
     double *arResiduals = NULL;
     if (q > 0 && p > 0 && currentLength > p) {
+        //DEBUG_PRINT("Computing AR residuals: length=%d, p=%d\n", currentLength, p);
         arResiduals = malloc(sizeof(double) * (currentLength - p));
         if (!arResiduals) { free(currentSeries); if (arEstimates) free(arEstimates); exit(EXIT_FAILURE); }
         for (int t = p; t < currentLength; t++) {
-            double pred = arEstimates[p]; // μ
-            for (int j = 0; j < p; j++) pred += arEstimates[j] * currentSeries[t - j - 1]; // Σφ_j y_{t-j}
-            arResiduals[t - p] = currentSeries[t] - pred; // ε_t = y_t - pred
+            double pred = arEstimates[p];
+            for (int j = 0; j < p; j++) pred += arEstimates[j] * currentSeries[t - j - 1];
+            arResiduals[t - p] = currentSeries[t] - pred;
         }
+        //DEBUG_PRINT("First few AR residuals: %.4f, %.4f, %.4f\n", arResiduals[0], arResiduals[1], arResiduals[2]);
     } else if (q > 0) {
+        //DEBUG_PRINT("No AR, using series as residuals: length=%d\n", currentLength);
         arResiduals = malloc(sizeof(double) * currentLength);
         if (!arResiduals) { free(currentSeries); if (arEstimates) free(arEstimates); exit(EXIT_FAILURE); }
-        copyArray(currentSeries, arResiduals, currentLength); // Use series directly if no AR
+        copyArray(currentSeries, arResiduals, currentLength);
     }
 
     // Step 6: Estimate MA parameters if q > 0
     double *maEstimates = NULL;
     if (q > 0 && arResiduals && currentLength - p > q) {
-        maEstimates = estimateMAWithMLE(arResiduals, currentLength - p, q); // Fit MA(q) via MLE
+        DEBUG_PRINT("Estimating MA parameters: q=%d, residual length=%d\n", q, currentLength - p);
+        maEstimates = estimateMAWithMLE(arResiduals, currentLength - p, q);
+        DEBUG_PRINT("MA estimates: ");
+        for (int i = 0; i < q; i++) DEBUG_PRINT("theta[%d]=%.4f, ", i, maEstimates[i]);
+        DEBUG_PRINT("mu=%.4f\n", maEstimates[q]);
+    } else {
+        DEBUG_PRINT("Skipping MA estimation: q=%d, residuals available=%s\n", q, arResiduals ? "yes" : "no");
     }
 
     // Step 7: Allocate forecast array and initialize past errors
@@ -2176,63 +2275,83 @@ double *forecastARIMA(double series[], int seriesLength, int p, int d, int q) {
     double pastErrors[q];
     memset(pastErrors, 0, q * sizeof(double));
     if (q > 0 && arResiduals) {
-        for (int i = 0; i < q && i < currentLength - p; i++) pastErrors[i] = arResiduals[currentLength - p - 1 - i]; // ε_{t-k}
+        DEBUG_PRINT("Initializing past errors for MA: q=%d\n", q);
+        for (int i = 0; i < q && i < currentLength - p; i++) {
+            pastErrors[i] = arResiduals[currentLength - p - 1 - i];
+            DEBUG_PRINT("pastErrors[%d]=%.4f\n", i, pastErrors[i]);
+        }
     }
 
     // Step 8: Compute one-step forecast
-    double oneStep = arEstimates ? arEstimates[p] : 0.0; // Start with μ
-    if (p > 0) for (int j = 0; j < p; j++) oneStep += arEstimates[j] * currentSeries[currentLength - j - 1]; // + Σφ_j y_{t-j}
-    else oneStep = currentSeries[currentLength - 1]; // Use last value if no AR
-    if (q > 0 && maEstimates) for (int j = 0; j < q; j++) oneStep += maEstimates[j] * pastErrors[j]; // + Σθ_k ε_{t-k}
+    double oneStep = arEstimates ? arEstimates[p] : 0.0;
+    if (p > 0) {
+        for (int j = 0; j < p; j++) oneStep += arEstimates[j] * currentSeries[currentLength - j - 1];
+        //DEBUG_PRINT("AR contribution to one-step: %.4f\n", oneStep);
+    } else {
+        oneStep = currentSeries[currentLength - 1];
+       //DEBUG_PRINT("No AR, using last value: %.4f\n", oneStep);
+    }
+    if (q > 0 && maEstimates) {
+        for (int j = 0; j < q; j++) oneStep += maEstimates[j] * pastErrors[j];
+        //DEBUG_PRINT("MA contribution added, one-step: %.4f\n", oneStep);
+    }
     forecast[0] = oneStep;
+    //DEBUG_PRINT("One-step forecast: %.4f\n", forecast[0]);
 
     // Step 9: Generate multi-step forecasts recursively
-    // Formula: f_{t+h} = μ + Σφ_j f_{t+h-j} (or y_{t+h-j}) + Σθ_k ε_{t+h-k} (0 if h>k)
+    DEBUG_PRINT("Generating multi-step forecasts up to horizon=%d\n", FORECAST_HORIZON);
     for (int h = 1; h < FORECAST_HORIZON; h++) {
         double f = arEstimates ? arEstimates[p] : 0.0;
         for (int j = 0; j < p; j++) {
             double value = (h - j - 1 >= 0) ? forecast[h - j - 1] : currentSeries[currentLength - j - 1];
-            f += arEstimates[j] * value; // AR terms
+            f += arEstimates[j] * value;
         }
         if (q > 0 && maEstimates) {
             for (int j = 0; j < q; j++) {
-                double error = (h - j - 1 >= 0) ? 0.0 : pastErrors[j]; // ε_{t+h-k} = 0 for h>k
-                f += maEstimates[j] * error; // MA terms
+                double error = (h - j - 1 >= 0) ? 0.0 : pastErrors[j];
+                f += maEstimates[j] * error;
             }
         }
         forecast[h] = f;
+        DEBUG_PRINT("Forecast at step %d: %.4f\n", h, forecast[h]);
     }
 
     // Step 10: Compute forecast variance
-    // Why: Quantifies uncertainty using psi-weights
+    //DEBUG_PRINT("Computing forecast variance\n");
     double psi[p + q];
     memset(psi, 0, sizeof(psi));
-    for (int i = 0; i < p; i++) psi[i] = arEstimates ? arEstimates[i] : 0.0; // ψ_j = φ_j for AR
-    for (int i = 0; i < q; i++) psi[p + i] = maEstimates ? maEstimates[i] : 0.0; // ψ_{p+k} = θ_k for MA
+    for (int i = 0; i < p; i++) psi[i] = arEstimates ? arEstimates[i] : 0.0;
+    for (int i = 0; i < q; i++) psi[p + i] = maEstimates ? maEstimates[i] : 0.0;
     double sigma2 = 0.0;
     if (arResiduals) {
         double sum_sq = 0.0;
         int n = currentLength - (p > 0 ? p : 0);
         for (int i = 0; i < n; i++) sum_sq += arResiduals[i] * arResiduals[i];
-        sigma2 = sum_sq / n; // σ² = Σε_t² / n
+        sigma2 = sum_sq / n;
+        DEBUG_PRINT("Residual variance (sigma^2): %.4f\n", sigma2);
     }
-    forecast[FORECAST_HORIZON] = sigma2; // 1-step variance
+    forecast[FORECAST_HORIZON] = sigma2;
     double var = sigma2;
     for (int h = 1; h < FORECAST_HORIZON; h++) {
-        for (int j = 0; j < h && j < p + q; j++) var += sigma2 * psi[j] * psi[j]; // σ_h² = σ² * (1 + Σψ_j²)
+        for (int j = 0; j < h && j < p + q; j++) var += sigma2 * psi[j] * psi[j];
+        //DEBUG_PRINT("Cumulative variance at step %d: %.4f\n", h, var);
     }
-    forecast[FORECAST_HORIZON + 1] = var; // Cumulative variance at last step
+    forecast[FORECAST_HORIZON + 1] = var;
 
     // Step 11: Integrate forecasts if differenced
-    // Why: Reverses differencing to original scale
     if (d > 0) {
         double recoveryValue = series[seriesLength - 1];
-        double *integrated = integrateSeries(forecast, recoveryValue, FORECAST_HORIZON); // f_t = f_{t-1} + Δf_t
+        DEBUG_PRINT("Integrating forecasts: d=%d, recoveryValue=%.4f\n", d, recoveryValue);
+        double *integrated = integrateSeries(forecast, recoveryValue, FORECAST_HORIZON);
         memcpy(forecast, integrated, FORECAST_HORIZON * sizeof(double));
         free(integrated);
+        DEBUG_PRINT("Integrated forecasts: ");
+        for (int i = 0; i < FORECAST_HORIZON; i++) DEBUG_PRINT("%.4f ", forecast[i]);
+        DEBUG_PRINT("\n");
     }
 
     // Step 12: Clean up and return
+    DEBUG_PRINT("Cleaning up and returning forecast\n");
     free(currentSeries);
     if (arEstimates) free(arEstimates);
     if (maEstimates) free(maEstimates);
@@ -2322,56 +2441,124 @@ double computeLjungBox(const double residuals[], int length, int maxLag) {
     return Q;
 }
 
+#define SERIES_LENGTH 175         // Length of sampleData subset for forecasting
+#define DEFAULT_AR_ORDER 2        // Default AR order for diagnostics
+#define DEFAULT_DIFF_ORDER 1      // Default differencing order
+#define DEFAULT_MA_ORDER 4        // Default MA order for diagnostics
+#define AUTO_MAX_LAG 10           // Max lag for ACF/PACF in auto-selection
+#define DIAGNOSTIC_LAG 10         // Max lag for diagnostics (ACF, Ljung-Box)
+#define ACF_ARRAY_SIZE (DIAGNOSTIC_LAG + 1) // ACF array size (lag 0 to 10)
+
+double* preprocessSeries(double *series, int length) {
+    double *adjusted = malloc(length * sizeof(double));
+    copyArray(series, adjusted, length);
+    adjustOutliers(adjusted, length);
+    return adjusted;
+}
+
+double* computeForecast(double *series, int length, int p, int d, int q) {
+    return forecastARIMA(series, length, p, d, q);
+}
+
+
+/**
+ * @brief Computes and displays diagnostic metrics for an ARIMA model fit.
+ *
+ * @details Evaluates the ARIMA model by generating residuals, computing autocorrelation function (ACF), 
+ * and performing the Ljung-Box test, then prints forecasts and diagnostics to assess model adequacy.
+ *
+ * **Steps Explained**:
+ * - **Step 1: Differencing**: Applies \( d \) differences to the series to ensure stationarity using 
+ *   `ensureStationary`, adjusting the length accordingly.
+ *   
+ * - **Step 2: AR Estimation**: Fits an AR(p) model to the differenced series with `estimateARWithCMLE`, 
+ *   producing coefficients \( \phi_1, ..., \phi_p, \mu \).
+ * 
+ * - **Step 3: AR Residuals**: Computes residuals from the AR fit by subtracting predictions from observations.
+ *  
+ * - **Step 4: MA Estimation**: Fits an MA(q) model to the AR residuals with `estimateMAWithMLE`, yielding 
+ *   coefficients \( \theta_1, ..., \theta_q, \mu \).
+ * 
+ * - **Step 5: Final Residuals**: Calculates final residuals by adjusting AR residuals with the MA model.
+ * 
+ * - **Step 6: Diagnostics**: Computes the maximum absolute ACF beyond lag 0 and the Ljung-Box Q statistic 
+ *   to assess residual whiteness.
+ *   
+ * - **Step 7: Output**: Prints the forecast, 1-step and cumulative variances, max ACF, and Ljung-Box statistic.
+ * 
+ * - **Step 8: Cleanup**: Frees all allocated memory to prevent leaks.
+ *
+ * @param series Input time series array (post-preprocessing).
+ * @param length Original length of the series.
+ * @param forecast Forecast array from `computeForecast`.
+ * @param p AR order for diagnostics.
+ * @param d Differencing order for diagnostics.
+ * @param q MA order for diagnostics.
+ */
+void computeDiagnostics(double *series, int length, double *forecast, int p, int d, int q) {
+    // Step 1: Apply differencing to ensure stationarity
+    int adjLength = length;
+    double *current = ensureStationary(series, &adjLength, d);
+
+    // Step 2: Estimate AR parameters
+    double *arEst = malloc((p + 1) * sizeof(double));
+    estimateARWithCMLE(current, adjLength, p, arEst);
+
+    // Step 3: Compute AR residuals
+    double *arRes = malloc((adjLength - p) * sizeof(double));
+    for (int t = p; t < adjLength; t++) {
+        double pred = arEst[p]; // Start with intercept
+        for (int j = 0; j < p; j++) pred += arEst[j] * current[t - j - 1]; // Add AR terms
+        arRes[t - p] = current[t] - pred; // Residual = actual - predicted
+    }
+
+    // Step 4: Estimate MA parameters on AR residuals
+    double *maEst = estimateMAWithMLE(arRes, adjLength - p, q);
+
+    // Step 5: Compute final residuals with MA adjustment
+    double *res = malloc((adjLength - p) * sizeof(double));
+    for (int t = q; t < adjLength; t++) {
+        double pred = maEst[q]; // Start with MA intercept
+        for (int j = 0; j < q && t - j - 1 >= p; j++) pred += maEst[j] * arRes[t - j - 1 - p]; // Add MA terms
+        res[t - p] = arRes[t - p] - pred; // Final residual
+    }
+
+    // Step 6: Compute diagnostic metrics
+    double acf[ACF_ARRAY_SIZE];
+    double max_acf = computeResidualACF(res, adjLength - p, DIAGNOSTIC_LAG, acf);
+    double lb_stat = computeLjungBox(res, adjLength - p, DIAGNOSTIC_LAG);
+
+    // Step 7: Print forecast and diagnostics
+    printf("ARIMA Forecast:\n");
+    for (int i = 0; i < FORECAST_HORIZON; i++) printf("%.4f ", forecast[i]);
+    printf("\n1-step forecast variance: %.4f\n", forecast[FORECAST_HORIZON]);
+    printf("Cumulative forecast variance at step %d: %.4f\n", FORECAST_HORIZON - 1, forecast[FORECAST_HORIZON + 1]);
+    printf("Max residual ACF (lag 1-%d): %.4f\n", DIAGNOSTIC_LAG, max_acf);
+    printf("Ljung-Box Q statistic (lag %d): %.4f\n", DIAGNOSTIC_LAG, lb_stat);
+
+    // Step 8: Free allocated memory
+    free(current);
+    free(arEst);
+    free(arRes);
+    free(maEst);
+    free(res);
+}
+
+
 /*==================== Main Function ====================*/
 int main(void) {
     
     double sampleData[] = {10.544653, 10.688583, 10.666841, 10.662732, 10.535033, 10.612065, 10.577628, 10.524487, 10.511290, 10.520899, 10.605484, 10.506456, 10.693456, 10.667562, 10.640863, 10.553473, 10.684760, 10.752397, 10.671068, 10.667091, 10.641893, 10.625706, 10.701795, 10.607544, 10.689169, 10.695256, 10.717050, 10.677475, 10.691141, 10.730298, 10.732664, 10.710082, 10.713123, 10.759815, 10.696599, 10.663845, 10.716597, 10.780855, 10.795759, 10.802620, 10.720496, 10.753401, 10.709436, 10.746909, 10.737377, 10.754609, 10.765248, 10.692602, 10.837926, 10.755324, 10.756213, 10.843190, 10.862529, 10.751269, 10.902390, 10.817731, 10.859796, 10.887362, 10.835401, 10.824412, 10.860767, 10.819504, 10.907496, 10.831528, 10.821727, 10.830010, 10.915317, 10.858694, 10.921139, 10.927524, 10.894352, 10.889785, 10.956356, 10.938758, 11.093567, 10.844841, 11.094493, 11.035941, 10.982765, 11.071057, 10.996308, 11.099276, 11.142057, 11.137176, 11.157537, 11.007247, 11.144075, 11.183029, 11.172096, 11.164571, 11.192833, 11.227109, 11.141589, 11.311490, 11.239783, 11.295933, 11.199566, 11.232262, 11.333208, 11.337874, 11.322334, 11.288216, 11.280459, 11.247973, 11.288277, 11.415095, 11.297583, 11.360763, 11.288338, 11.434631, 11.456051, 11.578981, 11.419166, 11.478404, 11.660141, 11.544303, 11.652028, 11.638368, 11.651792, 11.621518, 11.763853, 11.760687, 11.771138, 11.678104, 11.783163, 11.932094, 11.948678, 11.962627, 11.937934, 12.077570, 11.981595, 12.096366, 12.032683, 12.094221, 11.979764, 12.217793, 12.235930, 12.129859, 12.411867, 12.396301, 12.413920, 12.445867, 12.480462, 12.470674, 12.537774, 12.562252, 12.810248, 12.733546, 12.861890, 12.918012, 13.033087, 13.245610, 13.184196, 13.414342, 13.611838, 13.626345, 13.715446, 13.851129, 14.113374, 14.588537, 14.653982, 15.250756, 15.618371, 16.459558, 18.144264, 23.523062, 40.229511, 38.351265, 38.085281, 37.500885, 37.153946, 36.893066, 36.705956, 36.559536, 35.938847, 36.391586, 36.194046, 36.391586, 36.119102, 35.560543, 35.599018, 34.958851, 35.393860, 34.904797, 35.401318, 34.863518, 34.046680, 34.508522, 34.043182, 34.704235, 33.556644, 33.888481, 33.533638, 33.452129, 32.930935, 32.669731, 32.772537, 32.805634, 32.246761, 32.075809, 31.864927, 31.878294, 32.241131, 31.965626, 31.553604, 30.843288, 30.784569, 31.436094, 31.170496, 30.552132, 30.500242, 30.167421, 29.911989, 29.586046, 29.478958, 29.718994, 29.611095, 29.557945, 28.463432, 29.341291, 28.821512, 28.447210, 27.861872, 27.855633, 27.910660, 28.425800, 27.715517, 27.617193, 27.093372, 26.968832, 26.977205, 27.170172, 26.251677, 26.633236, 26.224941, 25.874708, 25.593761, 26.392395, 24.904768, 25.331600, 24.530737, 25.074808, 25.310865, 24.337013, 24.442986, 24.500193, 24.130409, 24.062714, 24.064592, 23.533037, 23.977909, 22.924667, 22.806379, 23.130791, 22.527645, 22.570505, 22.932512, 22.486126, 22.594856, 22.383926, 22.115181, 22.105082, 21.151754, 21.074114, 21.240192, 20.977468, 20.771507, 21.184586, 20.495111, 20.650751, 20.656075, 20.433039, 20.005697, 20.216360, 19.982117, 19.703951, 19.572884, 19.332155, 19.544645, 18.666328, 19.219872, 18.934229, 19.186989, 18.694986, 18.096903, 18.298306, 17.704309, 18.023785, 18.224157, 18.182484, 17.642824, 17.739542, 17.474176, 17.270575, 17.604120, 17.631210, 16.639175, 17.107626, 17.024216, 16.852285, 16.780111, 16.838861, 16.539309, 16.092861, 16.131529, 16.221350, 16.087164, 15.821659, 15.695448, 15.693087, 16.047991, 15.682863, 15.724131, 15.263708, 15.638486, 15.443835, 15.602257, 15.122874, 14.918172, 14.968882, 14.843689, 14.861169, 15.052527, 15.056897, 14.690192, 14.686479, 14.567565, 14.365212, 14.253309, 14.289158, 14.227124, 14.069589, 14.074703, 13.869432, 13.861959, 13.782178, 13.882711, 13.908362, 13.727641, 13.600214, 13.594969, 13.535290, 13.602018, 13.502626, 13.579159, 13.207825, 13.426789, 13.178141, 13.286413, 12.958746, 13.189507, 13.079733, 13.138372, 12.986096, 12.854589, 12.858962, 12.903029, 12.852099, 12.644394, 12.558786, 12.636994};
 
     int dataLength = sizeof(sampleData) / sizeof(sampleData[0]);
-    int adjustedLength = dataLength;
 
-    double *adjustedSeries = malloc(dataLength * sizeof(double));
-    copyArray(sampleData, adjustedSeries, dataLength);
-    adjustOutliers(adjustedSeries, dataLength);
-
-    double *forecast = forecastARIMA(adjustedSeries, 175, 2, 1, 4); // Adjusted length
-
-    // Compute residuals for diagnostics
-    double *currentSeries = ensureStationary(adjustedSeries, &adjustedLength, 1);
-    double *arEstimates = malloc(3 * sizeof(double));
-    estimateARWithCMLE(currentSeries, adjustedLength, 2, arEstimates);
-    double *arResiduals = malloc((adjustedLength - 2) * sizeof(double));
-    for (int t = 2; t < adjustedLength; t++) {
-        double pred = arEstimates[2];
-        for (int j = 0; j < 2; j++) pred += arEstimates[j] * currentSeries[t - j - 1];
-        arResiduals[t - 2] = currentSeries[t] - pred;
-    }
-    double *maEstimates = estimateMAWithMLE(arResiduals, adjustedLength - 2, 4);
-    double *residuals = malloc((adjustedLength - 2) * sizeof(double));
-    for (int t = 4; t < adjustedLength; t++) {
-        double pred = maEstimates[4];
-        for (int j = 0; j < 4 && t - j - 1 >= 2; j++) pred += maEstimates[j] * arResiduals[t - j - 1 - 2];
-        residuals[t - 2] = arResiduals[t - 2] - pred;
-    }
-
-    printf("ARIMA Forecast:\n");
-    for (int i = 0; i < FORECAST_HORIZON; i++) printf("%.4f ", forecast[i]);
-    printf("\n1-step forecast variance: %.4f\n", forecast[FORECAST_HORIZON]);
-    printf("Cumulative forecast variance at step %d: %.4f\n", FORECAST_HORIZON - 1, forecast[FORECAST_HORIZON + 1]);
-
-    // Diagnostics
-    double acf[11]; // Up to lag 10
-    double max_acf = computeResidualACF(residuals, adjustedLength - 2, 10, acf);
-    printf("Max residual ACF (lag 1-10): %.4f\n", max_acf);
-    double lb_stat = computeLjungBox(residuals, adjustedLength - 2, 10);
-    printf("Ljung-Box Q statistic (lag 10): %.4f\n", lb_stat);
+    double *adjustedSeries = preprocessSeries(sampleData, dataLength);
+    double *forecast = computeForecast(adjustedSeries, SERIES_LENGTH, -1, -1, -1);
+    computeDiagnostics(adjustedSeries, dataLength, forecast, DEFAULT_AR_ORDER, DEFAULT_DIFF_ORDER, DEFAULT_MA_ORDER);
 
     free(adjustedSeries);
-    free(currentSeries);
-    free(arEstimates);
-    free(arResiduals);
-    free(maEstimates);
-    free(residuals);
     free(forecast);
     return 0;
+    return 0;
 }
+
