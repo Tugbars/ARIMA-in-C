@@ -1221,6 +1221,278 @@ double *integrateSeries(const double diffForecast[], double recoveryValue, int f
   return integrated;
 }
 
+/**
+ * @brief Detrends a time series using a moving average approach with existing utilities.
+ *
+ * @details 
+ * Estimates the trend by computing a moving average over a specified window and 
+ * subtracts it from the input series. Adapted from talg.c's detrend_ma to use 
+ * calculateMean and calculateArrayDifference instead of mafilter.
+ *
+ * @param series Input time series array (length N).
+ * @param length Number of observations.
+ * @param window Size of the moving average window (must be > 0 and odd).
+ * @return Pointer to detrended series (length N); caller must free it.
+ */
+double *detrend_series(const double *series, int length, int window) {
+    if (length < 1 || window <= 0 || window > length) {
+        fprintf(stderr, "Error: Invalid length %d or window %d in detrend_series.\n", length, window);
+        return NULL;
+    }
+    if (window % 2 == 0) {
+        fprintf(stderr, "Error: Window %d must be odd in detrend_series.\n", window);
+        return NULL;
+    }
+
+    double *trend = malloc(sizeof(double) * length);
+    double *detrended = malloc(sizeof(double) * length);
+    if (!trend || !detrended) {
+        fprintf(stderr, "Memory allocation error in detrend_series.\n");
+        free(trend); free(detrended);
+        return NULL;
+    }
+
+    int half_window = (window - 1) / 2;
+
+    // Compute moving average trend
+    for (int i = 0; i < length; i++) {
+        int start = (i - half_window < 0) ? 0 : i - half_window;
+        int end = (i + half_window >= length) ? length - 1 : i + half_window;
+        int count = end - start + 1;
+        double window_sum = 0.0;
+        for (int j = start; j <= end; j++) {
+            window_sum += series[j];
+        }
+        trend[i] = window_sum / count; // Approximate calculateMean over window
+    }
+
+    // Subtract trend from series
+    for (int i = 0; i < length; i++) {
+        detrended[i] = series[i] - trend[i];
+    }
+
+    free(trend);
+    return detrended;
+}
+
+/**
+ * @brief Deseasons a time series using a moving average approach with existing utilities.
+ *
+ * @details 
+ * Removes seasonal components by estimating a trend with a moving average, 
+ * computing seasonal deviations, and subtracting them. Adapted from talg.c's 
+ * deseason_ma to use calculateMean instead of mafiltcer2.
+ *
+ * @param series Input time series array (length N).
+ * @param length Number of observations.
+ * @param period Seasonal period (e.g., 4 for quarterly, 12 for monthly).
+ * @return Pointer to deseasoned series (length N); caller must free it.
+ */
+double *deseason_series(const double *series, int length, int period) {
+    if (length < period || period <= 0) {
+        fprintf(stderr, "Error: Invalid length %d or period %d in deseason_series.\n", length, period);
+        return NULL;
+    }
+
+    double *trend = malloc(sizeof(double) * length);
+    double *seasonal = malloc(sizeof(double) * period);
+    double *deseasoned = malloc(sizeof(double) * length);
+    double *temp = malloc(sizeof(double) * period);
+    if (!trend || !seasonal || !deseasoned || !temp) {
+        fprintf(stderr, "Memory allocation error in deseason_series.\n");
+        free(trend); free(seasonal); free(deseasoned); free(temp);
+        return NULL;
+    }
+
+    // Step 1: Estimate trend with moving average
+    int half_period = (period - 1) / 2;
+    for (int i = 0; i < length; i++) {
+        int start = (i - half_period < 0) ? 0 : i - half_period;
+        int end = (i + half_period >= length) ? length - 1 : i + half_period;
+        int count = end - start + 1;
+        double window_sum = 0.0;
+        for (int j = start; j <= end; j++) {
+            window_sum += series[j];
+        }
+        trend[i] = window_sum / count; // Approximate calculateMean
+    }
+
+    // Step 2: Compute seasonal components
+    for (int k = 0; k < period; k++) {
+        int jd = k;
+        int count = 0;
+        double sum = 0.0;
+        while (jd < length - 2 * half_period) {
+            sum += series[half_period + jd] - trend[half_period + jd];
+            count++;
+            jd += period;
+        }
+        int per = (k + half_period) % period;
+        temp[per] = (count > 0) ? sum / count : 0.0;
+    }
+
+    // Center seasonal estimates
+    double wi = calculateMean(temp, period);
+    for (int k = 0; k < period; k++) {
+        seasonal[k] = temp[k] - wi;
+    }
+
+    // Step 3: Subtract seasonal component
+    for (int k = 0; k < length; k++) {
+        int it = k % period;
+        deseasoned[k] = series[k] - seasonal[it];
+    }
+
+    free(trend);
+    free(seasonal);
+    free(temp);
+    return deseasoned;
+}
+
+/**
+ * @brief Performs the KPSS test for stationarity, adapted from ur_kpss in ctsa code.
+ *
+ * @details 
+ * Tests the null hypothesis of stationarity (level or trend) against non-stationarity,
+ * mirroring ur_kpss but using the second code's utility functions. 
+ * - Model: y_t = r_t + βt + ε_t (r_t is a random walk, βt is a trend if "trend")
+ * - Statistic: η / s², where η is the scaled cumulative sum of residuals, s² is long-run variance
+ * - P-value: Interpolated from a critical value table
+ *
+ * **Method Used**: 
+ * - Fits a regression (intercept only or intercept + trend) to detrend the series.
+ * - Computes residuals and their cumulative sum.
+ * - Estimates long-run variance with a Bartlett kernel adjustment.
+ * - Interpolates p-value from a predefined table.
+ *
+ * @param series Input time series array.
+ * @param length Number of observations.
+ * @param type "level" for stationarity around a constant, "trend" for stationarity around a trend.
+ * @param lshort 1 for short lag (4*(N/100)^0.25), 0 for long lag (12*(N/100)^0.25); overridden if lags provided.
+ * @param lags Pointer to lag count; if NULL or negative, set by lshort; updated with final lag value.
+ * @param statistic Output pointer for KPSS test statistic.
+ * @param pval Output pointer for p-value.
+ * @return 0 on success, -1 on error.
+ */
+int kpssTest(double series[], int length, const char *type, int lshort, int *lags, double *statistic, double *pval) {
+    // Step 1: Validate inputs
+    if (length < 2 || !series || !statistic || !pval || !type) {
+        fprintf(stderr, "Error: Invalid input in kpssTest (length=%d, series=%p, statistic=%p, pval=%p, type=%p).\n",
+                length, (void*)series, (void*)statistic, (void*)pval, (void*)type);
+        return -1;
+    }
+    if (strcmp(type, "level") != 0 && strcmp(type, "trend") != 0) {
+        fprintf(stderr, "Error: Type must be 'level' or 'trend', got '%s'.\n", type);
+        return -1;
+    }
+
+    // Step 2: Determine lag length (from ur_kpss)
+    int l;
+    if (lags == NULL || *lags < 0) {
+        l = (lshort == 1) ? (int)(4.0 * pow((double)length / 100.0, 0.25)) : (int)(12.0 * pow((double)length / 100.0, 0.25));
+    } else {
+        l = *lags;
+    }
+    if (l >= length) {
+        fprintf(stderr, "Error: Lag %d too large for series length %d.\n", l, length);
+        return -1;
+    }
+
+    // Step 3: Allocate memory for regression inputs and outputs
+    double *tt = malloc(sizeof(double) * length); // Trend term
+    double *res = malloc(sizeof(double) * length); // Residuals
+    double *csum = malloc(sizeof(double) * length); // Cumulative sum of residuals
+    if (!tt || !res || !csum) {
+        fprintf(stderr, "Memory allocation error in kpssTest.\n");
+        free(tt); free(res); free(csum);
+        return -1;
+    }
+
+    // Step 4: Prepare trend and regression data
+    for (int i = 0; i < length; i++) {
+        tt[i] = (double)(i + 1); // Trend: 1, 2, ..., N
+    }
+    int p = (strcmp(type, "trend") == 0) ? 2 : 1; // Predictors: intercept (1), trend (2)
+    double X[length][2]; // Max 2 predictors
+    double Y[length][1];
+    for (int i = 0; i < length; i++) {
+        X[i][0] = 1.0; // Intercept
+        if (p == 2) X[i][1] = tt[i]; // Trend if "trend"
+        Y[i][0] = series[i];
+    }
+
+    // Step 5: Perform regression using the second code's utility
+    double *coeffs = performMultivariateLinearRegression(length, p, X, Y);
+    if (!coeffs) {
+        fprintf(stderr, "Error: Regression failed in kpssTest.\n");
+        free(tt); free(res); free(csum);
+        return -1;
+    }
+
+    // Step 6: Compute residuals
+    for (int i = 0; i < length; i++) {
+        double pred = coeffs[p]; // Intercept
+        if (p == 2) pred += coeffs[1] * tt[i]; // Add trend term if "trend"
+        res[i] = series[i] - pred;
+    }
+
+    // Step 7: Compute cumulative sum of residuals
+    csum[0] = res[0];
+    for (int i = 1; i < length; i++) {
+        csum[i] = csum[i - 1] + res[i];
+    }
+
+    // Step 8: Compute test statistic components
+    double eta = 0.0, s2 = 0.0;
+    for (int i = 0; i < length; i++) {
+        eta += csum[i] * csum[i];
+        s2 += res[i] * res[i];
+    }
+    eta /= (double)(length * length); // η = Σ(S_t²) / N²
+    s2 /= (double)length; // s² = Σ(ε_t²) / N (initial variance)
+
+    // Step 9: Adjust long-run variance (ppsum equivalent using second code utilities)
+    // Bartlett kernel adjustment as in ur_kpss
+    for (int k = 1; k <= l; k++) {
+        double w = 1.0 - (double)k / (double)(l + 1); // Bartlett weight
+        double cov = 0.0;
+        for (int i = k; i < length; i++) {
+            cov += res[i] * res[i - k]; // Autocovariance at lag k
+        }
+        s2 += 2.0 * w * cov / (double)length; // Add weighted covariance
+    }
+    *statistic = eta / s2;
+
+    // Step 10: Interpolate p-value using ur_kpss table
+    double tablep[4] = {0.01, 0.025, 0.05, 0.10};
+    double table[4];
+    if (strcmp(type, "trend") == 0) {
+        table[0] = 0.216; table[1] = 0.176; table[2] = 0.146; table[3] = 0.119;
+    } else { // "level"
+        table[0] = 0.739; table[1] = 0.574; table[2] = 0.463; table[3] = 0.347;
+    }
+    int k;
+    for (k = 0; k < 3 && table[k] < *statistic; k++);
+    if (k == 0) *pval = tablep[0];
+    else if (k == 4) *pval = tablep[3];
+    else {
+        double x0 = table[k - 1], x1 = table[k];
+        double p0 = tablep[k - 1], p1 = tablep[k];
+        *pval = p0 + (p1 - p0) * (*statistic - x0) / (x1 - x0);
+    }
+
+    // Step 11: Update lags if provided
+    if (lags != NULL) *lags = l;
+
+    // Step 12: Clean up
+    free(tt);
+    free(res);
+    free(csum);
+    free(coeffs);
+
+    return 0;
+}
+
 #define MODEL_CONSTANT_ONLY 0
 static const double ADF_CRIT_CONSTANT[3] = {-3.43, -2.86, -2.57};
 
@@ -1330,106 +1602,161 @@ double autocorrelation(const double series[], int n, int lag)
   return num / den;
 }
 
+
 /**
- * @brief Performs an Augmented Dickey-Fuller test with automatic lag selection to assess stationarity.
+ * @brief Performs an Augmented Dickey-Fuller (ADF) test on a time series, adapted from ur_df.
  *
- * @details
- * **Purpose**: Tests for a unit root in the time series to determine if differencing is needed in ARIMA,
- * selecting the optimal lag length based on AIC to balance fit and complexity.
+ * @details 
+ * This function implements the ADF test to check for a unit root, mirroring the methodology of 
+ * ur_df from unitroot.h but tailored to the ARIMA code's style. It:
+ * - Computes first differences of the series.
+ * - Fits a regression model with a trend and lagged differences.
+ * - Returns the test statistic and p-value, using interpolation from a critical value table.
+ * - Uses the second code's utility functions for regression and array operations.
  *
- * **Method Used**:
- * - Fits the ADF regression: \( \Delta y_t = \alpha + \beta y_{t-1} + \sum_{j=1}^{p} \gamma_j \Delta y_{t-j} + \epsilon_t \)
- * - Iterates over lag \( p \) from 0 to a maximum (based on \( \lfloor (n-1)^{1/3} \rfloor \)),
- *   computing AIC for each model.
- * - Selects the model with minimum AIC, using the coefficient \( \beta \) as the test statistic.
- * - Computes an approximate p-value via interpolation.
+ * **Method Used**: 
+ * - Model: Δy_t = α + βt + γy_{t-1} + Σδ_i Δy_{t-i} + ε_t
+ * - Test Statistic: t = γ / SE(γ), testing H0: γ = 0 (unit root)
+ * - P-value: Interpolated from a precomputed table based on sample size
  *
- * **Why This Method**:
- * - **Unit Root Detection**: Essential for ARIMA to ensure stationarity; \( \beta < 0 \) and significant
- *   indicates no unit root (stationary).
- * - **AIC-Based Lag Selection**: Balances overfitting and underfitting, automating a critical parameter choice.
- * - **OLS Estimation**: Robust and standard for regression-based tests like ADF.
- *
- * **Downsides and Limitations**:
- * - **AIC Bias**: May select suboptimal lags in small samples, favoring overly complex models.
- * - **Power**: ADF has low power against near-unit-root processes, potentially missing stationarity.
- * - **Simplified P-Value**: Interpolation is crude, reducing precision compared to full distribution tables.
- * - **Model Limitation**: Only supports constant-only model; trend or no-constant variants need adjustments.
- *
- * @param series The input time series.
- * @param length Length of the series.
- * @param modelType Model type (MODEL_CONSTANT_ONLY = 0).
- * @param tStat Output pointer for the test statistic (\( \beta \)).
- * @param pValue Output pointer for the approximate p-value.
- * @return 1 if null hypothesis (unit root) is rejected (stationary), 0 otherwise.
+ * @param series The input time series array.
+ * @param length The number of observations in the series.
+ * @param lags Pointer to the number of lags; if NULL, defaults to floor((length-1)^(1/3)).
+ * @param statistic Output pointer for the ADF test statistic.
+ * @param pval Output pointer for the p-value.
+ * @return 0 on success, -1 on error.
  */
-int ADFTestExtendedAutoLag(double series[], int length, int modelType, double *tStat, double *pValue)
-{
-  // Step 1: Determine maximum lag based on series length
-  // Heuristic: pMax = floor((n-1)^(1/3))
-  int pMax = (int)floor(pow(length - 1, ADF_LAG_EXPONENT));
-  if (pMax < 0)
-    pMax = 0;
-
-  int bestP = 0;
-  double bestAIC = 1e30;
-  double bestBeta = 0.0;
-
-  // Step 2: Iterate over possible lags to find best model
-  for (int p = 0; p <= pMax; p++)
-  {
-    int nEff = length - p - 1; // Effective sample size after lagging
-    int k = 2 + p;             // Parameters: constant, y_{t-1}, p lagged differences
-    if (nEff < k + 1)
-      break; // Ensure enough data points
-
-    // Step 3: Build ADF regression design matrix and response
-    double X[nEff][k];
-    double Y[nEff];
-    for (int i = 0; i < nEff; i++)
-    {
-      int t = i + p + 1;
-      Y[i] = series[t] - series[t - 1]; // \( \Delta y_t = y_t - y_{t-1} \)
-      int col = 0;
-      X[i][col++] = 1.0;           // Constant term
-      X[i][col++] = series[t - 1]; // Lagged level \( y_{t-1} \)
-      for (int j = 1; j <= p; j++)
-      {
-        X[i][col++] = series[t - j] - series[t - j - 1]; // Lagged differences
-      }
+int adfTest(double series[], int length, int *lags, double *statistic, double *pval) {
+    // Step 1: Validate inputs
+    if (length < 3 || !series || !statistic || !pval) {
+        fprintf(stderr, "Error: Invalid input in adfTest (length=%d, series=%p, statistic=%p, pval=%p).\n",
+                length, (void*)series, (void*)statistic, (void*)pval);
+        return -1;
     }
 
-    // Step 4: Estimate coefficients using OLS
-    double *betaEst = performMultivariateLinearRegression(nEff, k, X, (double(*)[1])Y);
+    // Step 2: Determine lag length
+    int lag = (lags == NULL || *lags < 0) ? (int)floor(pow((double)(length - 1), ADF_LAG_EXPONENT)) : *lags;
+    if (lag >= length - 2) {
+        fprintf(stderr, "Error: Lag %d too large for series length %d.\n", lag, length);
+        return -1;
+    }
+    int lags_plus_one = lag + 1;
+    int N1 = length - 1; // Length after differencing once
+    int N2 = N1 - lags_plus_one + 1; // Effective sample size after lagging
 
-    // Step 5: Compute residual sum of squares (RSS) for AIC
-    double RSS = 0.0;
-    for (int i = 0; i < nEff; i++)
-    {
-      double pred = 0.0;
-      for (int j = 0; j < k; j++)
-        pred += betaEst[j] * X[i][j];
-      double err = Y[i] - pred;
-      RSS += err * err;
+    // Step 3: Allocate memory for differences and regression inputs
+    double *diff = malloc(sizeof(double) * N1);  // Δy_t = y_t - y_{t-1}
+    double *lagged = malloc(sizeof(double) * N1); // y_{t-1}
+    double *trend = malloc(sizeof(double) * N2);  // t
+    double *X_lags = malloc(sizeof(double) * N2 * lag); // Lagged differences
+    if (!diff || !lagged || !trend || !X_lags) {
+        fprintf(stderr, "Memory allocation error in adfTest.\n");
+        free(diff); free(lagged); free(trend); free(X_lags);
+        return -1;
     }
 
-    // Step 6: Compute AIC: nEff * log(RSS/nEff) + 2 * k
-    double AIC = nEff * log(RSS / nEff) + 2.0 * k;
+    // Step 4: Compute first differences and lagged series
+    calculateArrayDifference(&series[1], series, diff, N1); // diff[i] = y[i+1] - y[i]
+    copyArray(series, lagged, N1); // lagged[i] = y[i]
 
-    // Step 7: Update best model if AIC improves
-    if (AIC < bestAIC)
-    {
-      bestAIC = AIC;
-      bestP = p;
-      bestBeta = betaEst[1]; // \( \beta \) is the coefficient on y_{t-1}
+    // Step 5: Prepare regression inputs
+    for (int i = 0; i < N2; i++) {
+        trend[i] = (double)(i + lags_plus_one); // Trend: t = lags+1, lags+2, ...
     }
-    free(betaEst);
-  }
+    for (int i = 0; i < lag; i++) {
+        for (int j = 0; j < N2; j++) {
+            X_lags[i * N2 + j] = diff[lags_plus_one + j - i - 1]; // Δy_{t-i-1}
+        }
+    }
 
-  // Step 8: Set outputs and determine stationarity
-  *tStat = bestBeta;
-  *pValue = adfPValue(bestBeta, modelType);
-  return (*pValue < 0.05) ? 1 : 0; // Reject null if p < 0.05
+    // Step 6: Build design matrix X and response Y
+    int p = lag + 2; // Predictors: y_{t-1}, trend, lag differences
+    double X[N2][p];
+    double Y[N2][1];
+    for (int i = 0; i < N2; i++) {
+        X[i][0] = lagged[lags_plus_one - 1 + i]; // y_{t-1}
+        X[i][1] = trend[i]; // trend
+        for (int j = 0; j < lag; j++) {
+            X[i][j + 2] = X_lags[j * N2 + i]; // lagged differences
+        }
+        Y[i][0] = diff[lags_plus_one - 1 + i]; // Δy_t
+    }
+
+    // Step 7: Perform regression using the second code's utility
+    double *coeffs = performMultivariateLinearRegression(N2, p, X, Y);
+    if (!coeffs) {
+        fprintf(stderr, "Error: Regression failed in adfTest.\n");
+        free(diff); free(lagged); free(trend); free(X_lags);
+        return -1;
+    }
+
+    // Step 8: Compute test statistic (t = γ / SE(γ))
+    // Note: SE computation simplified; assumes regression provides stable estimates
+    double gamma = coeffs[0]; // Coefficient on y_{t-1}
+    double *residuals = malloc(sizeof(double) * N2);
+    if (!residuals) {
+        free(coeffs); free(diff); free(lagged); free(trend); free(X_lags);
+        return -1;
+    }
+    for (int i = 0; i < N2; i++) {
+        double pred = coeffs[p]; // Intercept
+        for (int j = 0; j < p; j++) pred += coeffs[j] * X[i][j];
+        residuals[i] = Y[i][0] - pred;
+    }
+    double resid_sd = calculateStandardDeviation(residuals, N2);
+    double se_gamma = resid_sd / (calculateStandardDeviation(&lagged[lags_plus_one - 1], N2) * sqrt(N2));
+    *statistic = gamma / se_gamma;
+
+    // Step 9: Interpolate p-value using ur_df's table
+    double nT[6] = {25, 50, 100, 250, 500, 100000};
+    double prob[8] = {0.01, 0.025, 0.05, 0.10, 0.90, 0.95, 0.975, 0.99};
+    double dftable[48] = {
+        -4.38, -4.15, -4.04, -3.99, -3.98, -3.96,
+        -3.95, -3.80, -3.73, -3.69, -3.68, -3.66,
+        -3.60, -3.50, -3.45, -3.43, -3.42, -3.41,
+        -3.24, -3.18, -3.15, -3.13, -3.13, -3.12,
+        -1.14, -1.19, -1.22, -1.23, -1.24, -1.25,
+        -0.80, -0.87, -0.90, -0.92, -0.93, -0.94,
+        -0.50, -0.58, -0.62, -0.64, -0.65, -0.66,
+        -0.15, -0.24, -0.28, -0.31, -0.32, -0.33
+    }; // 8x6 table from ur_df
+    double tablep[8];
+    for (int i = 0; i < 8; i++) {
+        // Linear interpolation of critical values for sample size N1
+        int j;
+        for (j = 0; j < 5 && nT[j] < N1; j++);
+        if (j == 0) tablep[i] = dftable[i * 6];
+        else if (j == 6) tablep[i] = dftable[i * 6 + 5];
+        else {
+            double x0 = nT[j - 1], x1 = nT[j];
+            double y0 = dftable[i * 6 + (j - 1)], y1 = dftable[i * 6 + j];
+            tablep[i] = y0 + (y1 - y0) * (N1 - x0) / (x1 - x0);
+        }
+    }
+    // Interpolate p-value
+    int k;
+    for (k = 0; k < 7 && tablep[k] > *statistic; k++);
+    if (k == 0) *pval = prob[0];
+    else if (k == 8) *pval = prob[7];
+    else {
+        double x0 = tablep[k - 1], x1 = tablep[k];
+        double p0 = prob[k - 1], p1 = prob[k];
+        *pval = p0 + (p1 - p0) * (*statistic - x0) / (x1 - x0);
+    }
+    if (*statistic > tablep[4]) *pval = 1.0 - (1.0 - *pval); // Adjust for stationary alternative
+
+    // Step 10: Update lags if provided
+    if (lags != NULL) *lags = lag;
+
+    // Step 11: Clean up
+    free(diff);
+    free(lagged);
+    free(trend);
+    free(X_lags);
+    free(coeffs);
+    free(residuals);
+
+    return 0;
 }
 
 /**
@@ -1476,7 +1803,7 @@ double *ensureStationary(double series[], int *length, int specifiedD)
   int maxD = specifiedD > 0 ? specifiedD : 2;
 
   // Step 2: Difference until stationary or maxD reached
-  while (d < maxD && !ADFTestExtendedAutoLag(currentSeries, *length, MODEL_CONSTANT_ONLY, &tStat, &pValue))
+  while (d < maxD && !adfTest(currentSeries, *length, MODEL_CONSTANT_ONLY, &tStat, &pValue))
   {
     double *temp = differenceSeries(currentSeries, *length, 1);
     free(currentSeries);
@@ -1764,6 +2091,116 @@ int checkRoots(double coeffs[], int order, int isAR)
   free(roots);
   return valid;
 }
+
+/**
+ * @brief Ensures MA coefficients result in an invertible process by inverting roots inside the unit circle.
+ *
+ * @details 
+ * Matches the behavior of invertRoots from talg.c. Computes roots of the MA polynomial 
+ * \( 1 + \theta_1 z + ... + \theta_q z^q \), inverts roots with magnitude < 1.0, and reconstructs coefficients.
+ *
+ * **Method Used**: 
+ * - Determines effective degree by excluding trailing near-zero coefficients.
+ * - Computes roots using computeCompanionEigenvalues (assumed equivalent to polyroot).
+ * - Inverts roots with |z| < 1.0 to 1/conjugate(z).
+ * - Reconstructs coefficients using recursive polynomial multiplication.
+ * - Special case for qn = 1: directly inverts the coefficient.
+ *
+ * @param theta MA coefficients array (length q + 1, including intercept at theta[q]).
+ * @param q Order of the MA process (number of theta coefficients excluding intercept).
+ * @return 1 if adjustments were made, 0 if already invertible or no change needed.
+ */
+int ensure_MA_invertibility(double *theta, int q) {
+    if (q <= 0) return 0;
+
+    // Step 1: Determine effective degree qn
+    int qn = q;
+    while (qn > 0 && fabs(theta[qn - 1]) < 1e-10) {
+        qn--;
+    }
+    if (qn == 0) return 0; // All coefficients are zero
+
+    // Step 2: Allocate and construct MA polynomial coefficients
+    double *coeff = malloc(sizeof(double) * qn);
+    double complex *roots = malloc(qn * sizeof(double complex));
+    if (!coeff || !roots) {
+        fprintf(stderr, "Memory allocation error in ensure_MA_invertibility.\n");
+        free(coeff); free(roots);
+        return 0;
+    }
+    for (int i = 0; i < qn; i++) {
+        coeff[i] = theta[i];
+    }
+
+    // Step 3: Compute roots
+    if (!computeCompanionEigenvalues(coeff, qn, roots)) {
+        fprintf(stderr, "Root computation failed in ensure_MA_invertibility.\n");
+        free(coeff); free(roots);
+        return 0;
+    }
+
+    // Step 4: Check invertibility and adjust roots
+    int adjusted = 0;
+    for (int i = 0; i < qn; i++) {
+        double mag = cabs(roots[i]);
+        if (mag < 1.0) { // Strict comparison as in invertRoots
+            double real = creal(roots[i]), imag = cimag(roots[i]);
+            double mod_sq = real * real + imag * imag;
+            roots[i] = (real / mod_sq) - I * (-imag / mod_sq); // 1/conj(z)
+            adjusted = 1;
+        }
+    }
+
+    // Step 5: Special case for qn == 1
+    if (qn == 1 && adjusted) {
+        theta[0] = 1.0 / theta[0];
+        for (int i = 1; i < q; i++) theta[i] = 0.0;
+        free(coeff); free(roots);
+        return 1;
+    }
+
+    // Step 6: Reconstruct polynomial if adjustments were made
+    if (adjusted) {
+        double complex *xr = malloc((qn + 1) * sizeof(double complex));
+        double complex *yr = malloc((qn + 1) * sizeof(double complex));
+        if (!xr || !yr) {
+            fprintf(stderr, "Memory allocation error in coefficient reconstruction.\n");
+            free(coeff); free(roots); free(xr); free(yr);
+            return 0;
+        }
+        xr[0] = 1.0;
+        for (int i = 1; i <= qn; i++) xr[i] = 0.0;
+
+        for (int i = 0; i < qn; i++) {
+            double complex root = roots[i];
+            for (int j = i + 1; j >= 1; j--) {
+                yr[j] = xr[j - 1] - root * xr[j];
+            }
+            yr[0] = -root * xr[0];
+            for (int j = 0; j <= i + 1; j++) {
+                xr[j] = yr[j];
+            }
+        }
+
+        // Update theta with real parts
+        for (int i = 0; i < qn; i++) {
+            theta[i] = creal(xr[i + 1]);
+            if (fabs(cimag(xr[i + 1])) > 1e-10) {
+                fprintf(stderr, "Warning: Imaginary part %.4e in coefficient %d.\n", 
+                        cimag(xr[i + 1]), i + 1);
+            }
+        }
+        // Pad remaining coefficients with zeros
+        for (int i = qn; i < q; i++) {
+            theta[i] = 0.0;
+        }
+        free(xr); free(yr);
+    }
+
+    free(coeff); free(roots);
+    return adjusted;
+}
+
 
 /**
  * @brief Provides initial MA parameter estimates using the ACF of residuals.
@@ -2849,7 +3286,7 @@ double computeLjungBox(const double residuals[], int length, int maxLag)
   return Q;
 }
 
-#define SERIES_LENGTH 166                   // Length of sampleData subset for forecasting
+#define SERIES_LENGTH 173                   // Length of sampleData subset for forecasting
 #define DEFAULT_AR_ORDER 2                  // Default AR order for diagnostics
 #define DEFAULT_DIFF_ORDER 1                // Default differencing order
 #define DEFAULT_MA_ORDER 4                  // Default MA order for diagnostics
