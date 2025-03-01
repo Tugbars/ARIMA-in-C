@@ -6,6 +6,8 @@ Our journey started with a goal: build an ARIMA model that’s not just theoreti
 
 ---
 
+### Data preprocessing
+
 We begin with **data preprocessing**, a critical step to tame the wild swings in our input series. The `adjustOutliers` function uses the Median Absolute Deviation (MAD) to detect and cap extreme values. For a series \( y_t \), we compute the median \( m \), then calculate the MAD as:
 
 ![equation](https://latex.codecogs.com/svg.latex?\color{white}\text{MAD}%20%3D%20\text{median}(|y_t%20-%20m|))
@@ -26,6 +28,8 @@ int double_cmp(const void *a, const void *b) {
 This fix ensures accurate sorting, making the outlier adjustment mathematically valid. The upside is a cleaner series for ARIMA estimation; the downside is a fixed \( k = 2.5 \), which might be too strict or lenient depending on the data’s tail behavior.
 
 ---
+
+### Stationary
 
 Next, we tackle **stationarity**, the backbone of ARIMA, ensuring a stable mean and variance crucial for reliable modeling. The `differenceSeries` function applies \( d \)-th order differencing to remove trends:
 
